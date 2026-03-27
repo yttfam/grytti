@@ -99,7 +99,8 @@ async fn main() -> Result<()> {
 
     // Registry heartbeat
     if let Some(ref registry_url) = config.api.hermytt_registry {
-        let endpoint = format!("http://{}:{}", config.api.bind, config.api.port);
+        let endpoint = config.api.endpoint.clone()
+            .unwrap_or_else(|| format!("http://{}:{}", config.api.bind, config.api.port));
         let url = registry_url.clone();
         tokio::spawn(async move {
             api::announce_to_registry(&url, &endpoint).await;
