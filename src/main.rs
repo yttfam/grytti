@@ -1,3 +1,4 @@
+mod api;
 mod claude;
 mod config;
 mod grid;
@@ -23,8 +24,6 @@ use crate::grid::Grid;
 use crate::parser::GridPerformer;
 use crate::telegram::BotState;
 
-const DEBOUNCE_MS: u64 = 200;
-
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -40,6 +39,7 @@ async fn main() -> Result<()> {
     tracing::info!("loaded config from {}", config_path.display());
 
     let session_id = config.session_id.clone();
+    let debounce_ms = config.debounce_ms;
 
     // MQTT setup
     let (client, eventloop, mut rx, tx) = mqtt::connect(&config)?;
@@ -51,12 +51,11 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Subscribe to this session's PTY output + meta
     let sessions = vec![session_id.clone()];
     mqtt::subscribe(&client, &sessions).await?;
     mqtt::subscribe_meta(&client, &sessions).await?;
 
-    // Telegram bot state
+    // Telegram bot state (shared between TG bot, API, and main loop)
     let bot_state = Arc::new(Mutex::new(BotState {
         mqtt_client: client.clone(),
         session_id: session_id.clone(),
@@ -74,14 +73,44 @@ async fn main() -> Result<()> {
         }
     });
 
+    // Spawn REST API
+    let app_state = Arc::new(api::AppState {
+        bot_state: bot_state.clone(),
+        session_id: session_id.clone(),
+        debounce_ms,
+        mqtt_host: config.mqtt.host.clone(),
+        mqtt_port: config.mqtt.port,
+        start_time: std::time::Instant::now(),
+    });
+
+    let api_bind = format!("{}:{}", config.api.bind, config.api.port);
+    let api_router = api::router(app_state);
+    let listener = tokio::net::TcpListener::bind(&api_bind).await?;
+    tracing::info!("API listening on {}", api_bind);
+
+    tokio::spawn(async move {
+        if let Err(e) = axum::serve(listener, api_router).await {
+            tracing::error!("api server error: {}", e);
+        }
+    });
+
+    // Announce to hermytt registry if configured
+    if let Some(ref registry_url) = config.api.hermytt_registry {
+        let url = registry_url.clone();
+        let port = config.api.port;
+        tokio::spawn(async move {
+            api::announce_to_registry(&url, port).await;
+        });
+    }
+
     let tg_bot = Bot::new(&config.telegram.bot_token);
 
-    // Parser state for the session
+    // Parser state
     let mut vte_parser = Parser::new();
     let mut performer = GridPerformer::new(Grid::default());
     let mut last_update = Instant::now();
     let mut last_published = String::new();
-    let debounce = Duration::from_millis(DEBOUNCE_MS);
+    let debounce = Duration::from_millis(debounce_ms);
     let mut tick = tokio::time::interval(debounce);
 
     loop {
@@ -110,7 +139,6 @@ async fn main() -> Result<()> {
                 if now.duration_since(last_update) >= debounce {
                     let snapshot = performer.grid.snapshot();
                     if snapshot != last_published && !snapshot.is_empty() {
-                        // Publish to MQTT text topic
                         let _ = publish_client
                             .publish(
                                 &format!("hermytt/{}/pty/text", session_id),
@@ -120,17 +148,8 @@ async fn main() -> Result<()> {
                             )
                             .await;
 
-                        // Parse Claude state and push to Telegram
                         let screen = claude::parse_screen(&snapshot);
                         tracing::debug!(state = ?screen.state, "claude state");
-                        if screen.state == claude::ClaudeState::Unknown {
-                            // Log last 5 non-empty lines for debugging
-                            let tail: Vec<&str> = snapshot.lines()
-                                .filter(|l| !l.trim().is_empty())
-                                .collect();
-                            let tail_start = tail.len().saturating_sub(5);
-                            tracing::debug!(tail = ?&tail[tail_start..], "screen tail");
-                        }
 
                         let mut state = bot_state.lock().await;
                         telegram::on_screen_update(&tg_bot, &mut state, &screen).await;

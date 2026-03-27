@@ -5,8 +5,12 @@ use std::path::Path;
 pub struct Config {
     pub mqtt: MqttConfig,
     pub telegram: TelegramConfig,
+    #[serde(default = "default_api_config")]
+    pub api: ApiConfig,
     /// Session ID to bridge (single session for now)
     pub session_id: String,
+    #[serde(default = "default_debounce")]
+    pub debounce_ms: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -23,9 +27,18 @@ pub struct MqttConfig {
 #[derive(Debug, Deserialize)]
 pub struct TelegramConfig {
     pub bot_token: String,
-    /// Authorized chat IDs (empty = accept any)
     #[serde(default)]
     pub allowed_chats: Vec<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ApiConfig {
+    #[serde(default = "default_api_bind")]
+    pub bind: String,
+    #[serde(default = "default_api_port")]
+    pub port: u16,
+    /// Hermytt registry URL for service announcement
+    pub hermytt_registry: Option<String>,
 }
 
 fn default_port() -> u16 {
@@ -34,6 +47,26 @@ fn default_port() -> u16 {
 
 fn default_client_id() -> String {
     format!("grytti-{}", &uuid::Uuid::new_v4().to_string()[..8])
+}
+
+fn default_debounce() -> u64 {
+    200
+}
+
+fn default_api_bind() -> String {
+    "0.0.0.0".to_string()
+}
+
+fn default_api_port() -> u16 {
+    7780
+}
+
+fn default_api_config() -> ApiConfig {
+    ApiConfig {
+        bind: default_api_bind(),
+        port: default_api_port(),
+        hermytt_registry: None,
+    }
 }
 
 impl Config {

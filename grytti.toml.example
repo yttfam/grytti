@@ -1,4 +1,5 @@
 session_id = "your-session-id"
+# debounce_ms = 200
 
 [mqtt]
 host = "localhost"
@@ -9,3 +10,8 @@ port = 1883
 [telegram]
 bot_token = "YOUR_BOT_TOKEN"
 allowed_chats = []
+
+[api]
+bind = "0.0.0.0"
+port = 7780
+# hermytt_registry = "http://localhost:7777"
