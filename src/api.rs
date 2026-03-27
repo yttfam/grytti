@@ -1,8 +1,9 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::extract::State;
 use axum::http::StatusCode;
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
@@ -13,11 +14,16 @@ use crate::telegram::BotState;
 /// Shared app state for the API
 pub struct AppState {
     pub bot_state: Arc<Mutex<BotState>>,
-    pub session_id: String,
-    pub debounce_ms: u64,
+    pub mutable: Mutex<MutableState>,
     pub mqtt_host: String,
     pub mqtt_port: u16,
     pub start_time: std::time::Instant,
+    pub messages_processed: AtomicU64,
+}
+
+pub struct MutableState {
+    pub session_id: String,
+    pub debounce_ms: u64,
 }
 
 #[derive(Serialize)]
@@ -27,6 +33,7 @@ struct StatusResponse {
     claude_state: String,
     telegram_chat_id: Option<i64>,
     debounce_ms: u64,
+    messages_processed: u64,
 }
 
 #[derive(Serialize)]
@@ -36,7 +43,6 @@ struct ConfigResponse {
     mqtt_host: String,
     mqtt_port: u16,
     telegram_connected: bool,
-    allowed_chats: Vec<i64>,
 }
 
 #[derive(Serialize)]
@@ -51,10 +57,16 @@ struct SendRequest {
     text: String,
 }
 
+#[derive(Deserialize)]
+struct ConfigUpdate {
+    session_id: Option<String>,
+    debounce_ms: Option<u64>,
+}
+
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/status", get(get_status))
-        .route("/config", get(get_config))
+        .route("/config", get(get_config).put(put_config))
         .route("/session", get(get_session))
         .route("/session/send", post(send_to_session))
         .with_state(state)
@@ -62,45 +74,54 @@ pub fn router(state: Arc<AppState>) -> Router {
 
 async fn get_status(State(state): State<Arc<AppState>>) -> Json<StatusResponse> {
     let bot = state.bot_state.lock().await;
-    let claude_state = match bot.last_state {
-        ClaudeState::Idle => "idle",
-        ClaudeState::Thinking => "thinking",
-        ClaudeState::ToolUse => "tool_use",
-        ClaudeState::Unknown => "unknown",
-    };
+    let ms = state.mutable.lock().await;
+    let claude_state = claude_state_str(&bot.last_state);
 
     Json(StatusResponse {
-        session_id: state.session_id.clone(),
+        session_id: ms.session_id.clone(),
         uptime_secs: state.start_time.elapsed().as_secs(),
         claude_state: claude_state.to_string(),
         telegram_chat_id: bot.chat_id.map(|c| c.0),
-        debounce_ms: state.debounce_ms,
+        debounce_ms: ms.debounce_ms,
+        messages_processed: state.messages_processed.load(Ordering::Relaxed),
     })
 }
 
 async fn get_config(State(state): State<Arc<AppState>>) -> Json<ConfigResponse> {
     let bot = state.bot_state.lock().await;
+    let ms = state.mutable.lock().await;
     Json(ConfigResponse {
-        session_id: state.session_id.clone(),
-        debounce_ms: state.debounce_ms,
+        session_id: ms.session_id.clone(),
+        debounce_ms: ms.debounce_ms,
         mqtt_host: state.mqtt_host.clone(),
         mqtt_port: state.mqtt_port,
         telegram_connected: bot.chat_id.is_some(),
-        allowed_chats: vec![],
     })
+}
+
+async fn put_config(
+    State(state): State<Arc<AppState>>,
+    Json(update): Json<ConfigUpdate>,
+) -> StatusCode {
+    let mut ms = state.mutable.lock().await;
+    if let Some(sid) = update.session_id {
+        tracing::info!(session_id = %sid, "session_id updated via API");
+        ms.session_id = sid;
+    }
+    if let Some(d) = update.debounce_ms {
+        tracing::info!(debounce_ms = d, "debounce_ms updated via API");
+        ms.debounce_ms = d;
+    }
+    StatusCode::OK
 }
 
 async fn get_session(State(state): State<Arc<AppState>>) -> Json<SessionResponse> {
     let bot = state.bot_state.lock().await;
-    let claude_state = match bot.last_state {
-        ClaudeState::Idle => "idle",
-        ClaudeState::Thinking => "thinking",
-        ClaudeState::ToolUse => "tool_use",
-        ClaudeState::Unknown => "unknown",
-    };
+    let ms = state.mutable.lock().await;
+    let claude_state = claude_state_str(&bot.last_state);
 
     Json(SessionResponse {
-        session_id: state.session_id.clone(),
+        session_id: ms.session_id.clone(),
         claude_state: claude_state.to_string(),
         last_response: if bot.last_sent_response.is_empty() {
             None
@@ -115,13 +136,14 @@ async fn send_to_session(
     Json(req): Json<SendRequest>,
 ) -> StatusCode {
     let bot = state.bot_state.lock().await;
+    let ms = state.mutable.lock().await;
     let mut data = req.text.into_bytes();
     data.push(b'\r');
 
     match bot
         .mqtt_client
         .publish(
-            &format!("hermytt/{}/pty/in", state.session_id),
+            &format!("hermytt/{}/pty/in", ms.session_id),
             rumqttc::QoS::AtMostOnce,
             false,
             data,
@@ -133,17 +155,29 @@ async fn send_to_session(
     }
 }
 
+fn claude_state_str(state: &ClaudeState) -> &'static str {
+    match state {
+        ClaudeState::Idle => "idle",
+        ClaudeState::Thinking => "thinking",
+        ClaudeState::ToolUse => "tool_use",
+        ClaudeState::Unknown => "unknown",
+    }
+}
+
 /// Announce grytti to hermytt's service registry
-pub async fn announce_to_registry(registry_url: &str, api_port: u16) {
+pub async fn announce_to_registry(registry_url: &str, endpoint: &str) {
     let body = serde_json::json!({
         "name": "grytti",
         "role": "parser",
-        "endpoint": format!("http://localhost:{}", api_port),
-        "capabilities": ["pty-parse", "telegram-bridge", "claude-state"],
-        "version": env!("CARGO_PKG_VERSION"),
+        "endpoint": endpoint,
+        "meta": {
+            "host": hostname(),
+            "version": env!("CARGO_PKG_VERSION"),
+        }
     });
 
-    match reqwest::Client::new()
+    let client = reqwest::Client::new();
+    match client
         .post(&format!("{}/registry/announce", registry_url))
         .json(&body)
         .send()
@@ -156,4 +190,19 @@ pub async fn announce_to_registry(registry_url: &str, api_port: u16) {
             tracing::warn!("failed to announce to registry: {}", e);
         }
     }
+}
+
+/// Run heartbeat loop — re-announce every 15s
+pub async fn heartbeat_loop(registry_url: String, endpoint: String) {
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(15));
+    loop {
+        interval.tick().await;
+        announce_to_registry(&registry_url, &endpoint).await;
+    }
+}
+
+fn hostname() -> String {
+    std::env::var("HOSTNAME")
+        .or_else(|_| std::env::var("HOST"))
+        .unwrap_or_else(|_| "unknown".to_string())
 }

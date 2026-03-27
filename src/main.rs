@@ -7,6 +7,7 @@ mod parser;
 mod telegram;
 
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -39,7 +40,6 @@ async fn main() -> Result<()> {
     tracing::info!("loaded config from {}", config_path.display());
 
     let session_id = config.session_id.clone();
-    let debounce_ms = config.debounce_ms;
 
     // MQTT setup
     let (client, eventloop, mut rx, tx) = mqtt::connect(&config)?;
@@ -55,7 +55,7 @@ async fn main() -> Result<()> {
     mqtt::subscribe(&client, &sessions).await?;
     mqtt::subscribe_meta(&client, &sessions).await?;
 
-    // Telegram bot state (shared between TG bot, API, and main loop)
+    // Telegram bot state
     let bot_state = Arc::new(Mutex::new(BotState {
         mqtt_client: client.clone(),
         session_id: session_id.clone(),
@@ -76,15 +76,18 @@ async fn main() -> Result<()> {
     // Spawn REST API
     let app_state = Arc::new(api::AppState {
         bot_state: bot_state.clone(),
-        session_id: session_id.clone(),
-        debounce_ms,
+        mutable: Mutex::new(api::MutableState {
+            session_id: session_id.clone(),
+            debounce_ms: config.debounce_ms,
+        }),
         mqtt_host: config.mqtt.host.clone(),
         mqtt_port: config.mqtt.port,
         start_time: std::time::Instant::now(),
+        messages_processed: std::sync::atomic::AtomicU64::new(0),
     });
 
     let api_bind = format!("{}:{}", config.api.bind, config.api.port);
-    let api_router = api::router(app_state);
+    let api_router = api::router(app_state.clone());
     let listener = tokio::net::TcpListener::bind(&api_bind).await?;
     tracing::info!("API listening on {}", api_bind);
 
@@ -94,12 +97,13 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Announce to hermytt registry if configured
+    // Registry heartbeat
     if let Some(ref registry_url) = config.api.hermytt_registry {
+        let endpoint = format!("http://{}:{}", config.api.bind, config.api.port);
         let url = registry_url.clone();
-        let port = config.api.port;
         tokio::spawn(async move {
-            api::announce_to_registry(&url, port).await;
+            api::announce_to_registry(&url, &endpoint).await;
+            api::heartbeat_loop(url, endpoint).await;
         });
     }
 
@@ -110,7 +114,7 @@ async fn main() -> Result<()> {
     let mut performer = GridPerformer::new(Grid::default());
     let mut last_update = Instant::now();
     let mut last_published = String::new();
-    let debounce = Duration::from_millis(debounce_ms);
+    let debounce = Duration::from_millis(config.debounce_ms);
     let mut tick = tokio::time::interval(debounce);
 
     loop {
@@ -119,13 +123,17 @@ async fn main() -> Result<()> {
                 let Some(msg) = msg else { break };
                 match msg {
                     mqtt::Message::Pty(pty) => {
-                        if pty.session_id == session_id {
+                        let ms = app_state.mutable.lock().await;
+                        if pty.session_id == ms.session_id {
+                            drop(ms);
                             GridPerformer::feed(&mut vte_parser, &mut performer, &pty.payload);
                             last_update = Instant::now();
+                            app_state.messages_processed.fetch_add(1, Ordering::Relaxed);
                         }
                     }
                     mqtt::Message::Meta(meta) => {
-                        if meta.session_id == session_id {
+                        let ms = app_state.mutable.lock().await;
+                        if meta.session_id == ms.session_id {
                             if let Some((cols, rows)) = meta.resize {
                                 tracing::info!("resize to {}x{}", cols, rows);
                                 performer.grid.resize(cols, rows);
@@ -136,12 +144,17 @@ async fn main() -> Result<()> {
             }
             _ = tick.tick() => {
                 let now = Instant::now();
-                if now.duration_since(last_update) >= debounce {
+                let ms = app_state.mutable.lock().await;
+                let current_debounce = Duration::from_millis(ms.debounce_ms);
+                let sid = ms.session_id.clone();
+                drop(ms);
+
+                if now.duration_since(last_update) >= current_debounce {
                     let snapshot = performer.grid.snapshot();
                     if snapshot != last_published && !snapshot.is_empty() {
                         let _ = publish_client
                             .publish(
-                                &format!("hermytt/{}/pty/text", session_id),
+                                &format!("hermytt/{}/pty/text", sid),
                                 QoS::AtMostOnce,
                                 false,
                                 snapshot.as_bytes(),
