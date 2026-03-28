@@ -6,6 +6,7 @@ use teloxide::prelude::*;
 use teloxide::types::ChatAction;
 use tokio::sync::Mutex;
 
+use crate::api::AppState;
 use crate::claude::{ClaudeScreen, ClaudeState};
 
 /// Shared state between the Telegram bot and the MQTT bridge
@@ -23,48 +24,72 @@ pub struct BotState {
 pub async fn run_bot(
     token: &str,
     state: Arc<Mutex<BotState>>,
+    app_state: Arc<AppState>,
 ) -> Result<()> {
     let bot = Bot::new(token);
 
     let state_for_handler = state.clone();
 
     let handler = Update::filter_message().endpoint(
-        move |bot: Bot, msg: Message, state: Arc<Mutex<BotState>>| async move {
-            let text = match msg.text() {
-                Some(t) => t.to_string(),
-                None => return respond(()),
-            };
+        move |bot: Bot, msg: Message, state: Arc<Mutex<BotState>>| {
+            let app = app_state.clone();
+            async move {
+                let text = match msg.text() {
+                    Some(t) => t.to_string(),
+                    None => return respond(()),
+                };
 
-            let session_id = {
-                let mut s = state.lock().await;
-                // Remember the chat ID for pushing updates
-                s.chat_id = Some(msg.chat.id);
-                s.session_id.clone()
-            };
+                {
+                    let mut s = state.lock().await;
+                    s.chat_id = Some(msg.chat.id);
+                }
 
-            tracing::info!(chat = %msg.chat.id, text = %text, "telegram message received");
+                tracing::info!(chat = %msg.chat.id, text = %text, "telegram message received");
 
-            // Send typing indicator
-            let _ = bot.send_chat_action(msg.chat.id, ChatAction::Typing).await;
+                // Check if login flow is waiting for a code
+                let is_waiting_for_code = {
+                    let lf = app.login_flow.lock().await;
+                    lf.is_waiting_for_code()
+                };
 
-            // Inject into Claude's stdin
-            let mqtt = state.lock().await.mqtt_client.clone();
-            let mut data = text.into_bytes();
-            data.push(b'\r');
-            if let Err(e) = mqtt
-                .publish(
-                    &format!("hermytt/{}/pty/in", session_id),
-                    rumqttc::QoS::AtMostOnce,
-                    false,
-                    data,
-                )
-                .await
-            {
-                tracing::error!("failed to send stdin: {}", e);
-                let _ = bot.send_message(msg.chat.id, "Failed to send to Claude").await;
+                let session_id = app.mutable.lock().await.session_id.clone();
+                let mqtt = state.lock().await.mqtt_client.clone();
+
+                if is_waiting_for_code {
+                    // Forward as OAuth code — paste into the "Paste code here" prompt
+                    tracing::info!("forwarding auth code to Claude");
+                    let _ = bot.send_message(msg.chat.id, "Sending auth code...").await;
+                    let mut data = text.into_bytes();
+                    data.push(b'\r');
+                    let _ = mqtt
+                        .publish(
+                            &format!("hermytt/{}/pty/in", session_id),
+                            rumqttc::QoS::AtMostOnce,
+                            false,
+                            data,
+                        )
+                        .await;
+                } else {
+                    // Normal message — send typing + inject into Claude
+                    let _ = bot.send_chat_action(msg.chat.id, ChatAction::Typing).await;
+                    let mut data = text.into_bytes();
+                    data.push(b'\r');
+                    if let Err(e) = mqtt
+                        .publish(
+                            &format!("hermytt/{}/pty/in", session_id),
+                            rumqttc::QoS::AtMostOnce,
+                            false,
+                            data,
+                        )
+                        .await
+                    {
+                        tracing::error!("failed to send stdin: {}", e);
+                        let _ = bot.send_message(msg.chat.id, "Failed to send to Claude").await;
+                    }
+                }
+
+                Ok(())
             }
-
-            Ok(())
         },
     );
 
@@ -86,7 +111,7 @@ pub async fn on_screen_update(
 ) {
     let chat_id = match state.chat_id {
         Some(id) => id,
-        None => return, // No chat yet, nobody to notify
+        None => return,
     };
 
     // State transition: became thinking → send typing indicator
@@ -95,7 +120,7 @@ pub async fn on_screen_update(
         let _ = bot.send_chat_action(chat_id, ChatAction::Typing).await;
     }
 
-    // Keep sending typing while thinking (Telegram typing expires after ~5s)
+    // Keep sending typing while thinking
     if screen.state == ClaudeState::Thinking {
         let _ = bot.send_chat_action(chat_id, ChatAction::Typing).await;
     }
@@ -105,7 +130,6 @@ pub async fn on_screen_update(
         if let Some(ref response) = screen.response {
             if *response != state.last_sent_response && !response.is_empty() {
                 tracing::info!(len = response.len(), "sending response to telegram");
-                // Telegram has a 4096 char limit per message
                 for chunk in chunk_message(response, 4096) {
                     let _ = bot.send_message(chat_id, chunk).await;
                 }
@@ -125,7 +149,6 @@ fn chunk_message(text: &str, max_len: usize) -> Vec<&str> {
     let mut start = 0;
     while start < text.len() {
         let end = (start + max_len).min(text.len());
-        // Try to break at a newline
         let break_at = text[start..end]
             .rfind('\n')
             .map(|i| start + i + 1)

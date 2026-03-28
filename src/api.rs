@@ -19,6 +19,8 @@ pub struct AppState {
     pub mqtt_port: u16,
     pub start_time: std::time::Instant,
     pub messages_processed: AtomicU64,
+    pub last_snapshot: Mutex<String>,
+    pub login_flow: Mutex<crate::login::LoginFlow>,
 }
 
 pub struct MutableState {
@@ -69,7 +71,12 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/config", get(get_config).put(put_config))
         .route("/session", get(get_session))
         .route("/session/send", post(send_to_session))
+        .route("/snapshot", get(get_snapshot))
         .with_state(state)
+}
+
+async fn get_snapshot(State(state): State<Arc<AppState>>) -> String {
+    state.last_snapshot.lock().await.clone()
 }
 
 async fn get_status(State(state): State<Arc<AppState>>) -> Json<StatusResponse> {
@@ -160,6 +167,8 @@ fn claude_state_str(state: &ClaudeState) -> &'static str {
         ClaudeState::Idle => "idle",
         ClaudeState::Thinking => "thinking",
         ClaudeState::ToolUse => "tool_use",
+        ClaudeState::NotLoggedIn => "not_logged_in",
+        ClaudeState::LoginPrompt => "login_prompt",
         ClaudeState::Unknown => "unknown",
     }
 }

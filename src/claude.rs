@@ -9,6 +9,10 @@ pub enum ClaudeState {
     Thinking,
     /// Tool use in progress (Read, Write, Bash, etc.)
     ToolUse,
+    /// Not logged in
+    NotLoggedIn,
+    /// Login flow in progress
+    LoginPrompt,
     /// Unknown / startup / not yet determined
     Unknown,
 }
@@ -23,6 +27,10 @@ pub struct ClaudeScreen {
     pub spinner_text: Option<String>,
     /// The current tool use block, if any
     pub tool_block: Option<String>,
+    /// OAuth login URL if visible on screen
+    pub login_url: Option<String>,
+    /// Whether "Paste code here" prompt is visible
+    pub awaiting_code: bool,
 }
 
 // Spinner symbols Claude Code uses (rotating set)
@@ -48,17 +56,24 @@ pub fn parse_screen(snapshot: &str) -> ClaudeScreen {
     let mut state = ClaudeState::Unknown;
     let mut spinner_text = None;
     let mut tool_block = None;
+    let mut login_url = None;
+    let mut awaiting_code = false;
 
-    // Scan ALL non-empty lines for spinner/tool markers.
-    // The TUI layout puts spinner above the prompt area, so bottom-up
-    // with early break doesn't work. Instead, scan everything and
-    // let the most specific marker win.
     let mut has_esc_to_interrupt = false;
     let mut has_idle_prompt = false;
+    let mut has_not_logged_in = false;
+    let mut has_login_menu = false;
+
+    // Collect URL fragments across wrapped lines
+    let mut url_fragments: Vec<String> = Vec::new();
+    let mut in_url = false;
 
     for line in &lines {
         let trimmed = line.trim();
         if trimmed.is_empty() {
+            if in_url {
+                in_url = false;
+            }
             continue;
         }
 
@@ -72,6 +87,35 @@ pub fn parse_screen(snapshot: &str) -> ClaudeScreen {
         if trimmed == "? for shortcuts" {
             has_idle_prompt = true;
             continue;
+        }
+
+        // "Not logged in" detection
+        if trimmed.contains("Not logged in") {
+            has_not_logged_in = true;
+        }
+
+        // Login menu detection
+        if trimmed.contains("Select login method") {
+            has_login_menu = true;
+        }
+
+        // "Paste code here" detection
+        if trimmed.contains("Paste code here") {
+            awaiting_code = true;
+        }
+
+        // OAuth URL extraction — URL wraps across multiple lines in the grid
+        if trimmed.starts_with("https://claude.com/cai/oauth") {
+            in_url = true;
+            url_fragments.clear();
+            url_fragments.push(trimmed.to_string());
+        } else if in_url {
+            // Continuation lines of wrapped URL (no spaces in URLs)
+            if !trimmed.contains(' ') || trimmed.starts_with("9-") || trimmed.starts_with("laude") || trimmed.starts_with("e+") || trimmed.starts_with("ile_") || trimmed.starts_with("hallenge") {
+                url_fragments.push(trimmed.to_string());
+            } else {
+                in_url = false;
+            }
         }
 
         // Check for spinner — symbol + word combo
@@ -98,9 +142,18 @@ pub fn parse_screen(snapshot: &str) -> ClaudeScreen {
         }
     }
 
+    // Reconstruct URL from fragments
+    if !url_fragments.is_empty() {
+        login_url = Some(url_fragments.join(""));
+    }
+
     // Resolve state from signals
     if state == ClaudeState::Unknown {
-        if has_esc_to_interrupt {
+        if has_login_menu || awaiting_code {
+            state = ClaudeState::LoginPrompt;
+        } else if has_not_logged_in {
+            state = ClaudeState::NotLoggedIn;
+        } else if has_esc_to_interrupt {
             state = ClaudeState::Thinking;
         } else if has_idle_prompt {
             state = ClaudeState::Idle;
@@ -114,6 +167,8 @@ pub fn parse_screen(snapshot: &str) -> ClaudeScreen {
         response,
         spinner_text,
         tool_block,
+        login_url,
+        awaiting_code,
     }
 }
 

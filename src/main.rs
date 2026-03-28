@@ -2,6 +2,7 @@ mod api;
 mod claude;
 mod config;
 mod grid;
+mod login;
 mod mqtt;
 mod parser;
 mod telegram;
@@ -51,8 +52,6 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Subscribe to all sessions (wildcard) — session_id filtering happens in the main loop
-    // so we can switch sessions via API without resubscribing
     mqtt::subscribe(&client, &[]).await?;
     mqtt::subscribe_meta(&client, &[]).await?;
 
@@ -65,15 +64,6 @@ async fn main() -> Result<()> {
         chat_id: None,
     }));
 
-    // Spawn Telegram bot
-    let tg_token = config.telegram.bot_token.clone();
-    let bot_state_tg = bot_state.clone();
-    tokio::spawn(async move {
-        if let Err(e) = telegram::run_bot(&tg_token, bot_state_tg).await {
-            tracing::error!("telegram bot error: {}", e);
-        }
-    });
-
     // Spawn REST API
     let app_state = Arc::new(api::AppState {
         bot_state: bot_state.clone(),
@@ -85,6 +75,18 @@ async fn main() -> Result<()> {
         mqtt_port: config.mqtt.port,
         start_time: std::time::Instant::now(),
         messages_processed: std::sync::atomic::AtomicU64::new(0),
+        last_snapshot: Mutex::new(String::new()),
+        login_flow: Mutex::new(login::LoginFlow::new()),
+    });
+
+    // Spawn Telegram bot — pass app_state so it can check login flow
+    let tg_token = config.telegram.bot_token.clone();
+    let bot_state_tg = bot_state.clone();
+    let app_state_tg = app_state.clone();
+    tokio::spawn(async move {
+        if let Err(e) = telegram::run_bot(&tg_token, bot_state_tg, app_state_tg).await {
+            tracing::error!("telegram bot error: {}", e);
+        }
     });
 
     let api_bind = format!("{}:{}", config.api.bind, config.api.port);
@@ -167,9 +169,18 @@ async fn main() -> Result<()> {
                         let screen = claude::parse_screen(&snapshot);
                         tracing::debug!(state = ?screen.state, "claude state");
 
-                        let mut state = bot_state.lock().await;
-                        telegram::on_screen_update(&tg_bot, &mut state, &screen).await;
+                        // Drive login flow first
+                        let mut lf = app_state.login_flow.lock().await;
+                        let consumed = lf.on_screen_update(&tg_bot, &app_state, &screen).await;
+                        drop(lf);
 
+                        // If login flow didn't consume this update, do normal TG handling
+                        if !consumed {
+                            let mut state = bot_state.lock().await;
+                            telegram::on_screen_update(&tg_bot, &mut state, &screen).await;
+                        }
+
+                        *app_state.last_snapshot.lock().await = snapshot.clone();
                         last_published = snapshot;
                     }
                 }
