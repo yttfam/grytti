@@ -138,16 +138,9 @@ pub fn parse_screen(snapshot: &str) -> ClaudeScreen {
             }
         }
 
-        // Check for tool use
-        if state != ClaudeState::Thinking {
-            for marker in TOOL_MARKERS {
-                if trimmed.contains(marker) {
-                    state = ClaudeState::ToolUse;
-                    tool_block = Some(trimmed.to_string());
-                    break;
-                }
-            }
-        }
+        // Tool use markers are unreliable for state — old tool calls remain
+        // on screen after completion. We track tool_block for info but don't
+        // set state from it. State comes from bottom-bar indicators instead.
     }
 
     // Reconstruct URL from fragments
@@ -155,17 +148,18 @@ pub fn parse_screen(snapshot: &str) -> ClaudeScreen {
         login_url = Some(url_fragments.join(""));
     }
 
-    // Resolve state from signals
-    if state == ClaudeState::Unknown {
-        if has_login_menu || awaiting_code {
-            state = ClaudeState::LoginPrompt;
-        } else if has_not_logged_in {
-            state = ClaudeState::NotLoggedIn;
-        } else if has_esc_to_interrupt {
-            state = ClaudeState::Thinking;
-        } else if has_idle_prompt {
-            state = ClaudeState::Idle;
-        }
+    // Resolve state from bottom-bar indicators (most reliable)
+    // These override any spinner detection since they're authoritative
+    if has_login_menu || awaiting_code {
+        state = ClaudeState::LoginPrompt;
+    } else if has_not_logged_in && state == ClaudeState::Unknown {
+        state = ClaudeState::NotLoggedIn;
+    } else if has_esc_to_interrupt {
+        // "esc to interrupt" = thinking or tool use in progress
+        state = ClaudeState::Thinking;
+    } else if has_idle_prompt {
+        // "? for shortcuts" = idle, ready for input
+        state = ClaudeState::Idle;
     }
 
     let response = extract_last_response(&lines);
