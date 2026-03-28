@@ -162,7 +162,7 @@ pub fn parse_screen(snapshot: &str) -> ClaudeScreen {
         state = ClaudeState::Idle;
     }
 
-    let response = extract_last_response(&lines);
+    let response = extract_turn_response(&lines);
 
     ClaudeScreen {
         state,
@@ -175,19 +175,67 @@ pub fn parse_screen(snapshot: &str) -> ClaudeScreen {
     }
 }
 
-/// Extract the text content after the last `⏺` marker.
-fn extract_last_response(lines: &[&str]) -> Option<String> {
-    let mut last_response_start = None;
+/// Extract the full response for the last turn — everything between the last
+/// `❯` prompt and the next prompt/separator area. Includes tool calls + output.
+fn extract_turn_response(lines: &[&str]) -> Option<String> {
+    // Find the second-to-last `❯` line — that's where the user's last message was.
+    // Everything between that and the next `❯` (or end) is the response.
+    let mut prompt_positions: Vec<usize> = Vec::new();
     for (i, line) in lines.iter().enumerate() {
-        if line.trim().starts_with("⏺") {
-            last_response_start = Some(i);
+        let trimmed = line.trim();
+        if trimmed.starts_with("❯") {
+            prompt_positions.push(i);
         }
     }
 
-    let start = last_response_start?;
+    // Need at least 2 prompts: the one with the user's message and the current empty one
+    if prompt_positions.len() < 2 {
+        // Fall back: try to find any ⏺ block
+        return extract_last_response_block(lines);
+    }
+
+    // The second-to-last prompt is the user's last input
+    let last_input_idx = prompt_positions[prompt_positions.len() - 2];
+    // The last prompt is the current empty one
+    let current_prompt_idx = prompt_positions[prompt_positions.len() - 1];
+
+    let mut response_lines = Vec::new();
+    for i in (last_input_idx + 1)..current_prompt_idx {
+        let trimmed = lines[i].trim();
+        // Skip heavy separators
+        if trimmed.len() > 20 && trimmed.chars().all(|c| c == '─') {
+            continue;
+        }
+        response_lines.push(lines[i].trim_end().to_string());
+    }
+
+    // Trim leading/trailing empty lines
+    while response_lines.first().map_or(false, |l| l.trim().is_empty()) {
+        response_lines.remove(0);
+    }
+    while response_lines.last().map_or(false, |l| l.trim().is_empty()) {
+        response_lines.pop();
+    }
+
+    if response_lines.is_empty() {
+        None
+    } else {
+        Some(response_lines.join("\n"))
+    }
+}
+
+/// Fallback: extract text after the last `⏺` marker.
+fn extract_last_response_block(lines: &[&str]) -> Option<String> {
+    let mut last_start = None;
+    for (i, line) in lines.iter().enumerate() {
+        if line.trim().starts_with("⏺") {
+            last_start = Some(i);
+        }
+    }
+
+    let start = last_start?;
     let mut response_lines = Vec::new();
 
-    // First line: strip the ⏺ marker
     let first = lines[start].trim();
     let after_marker = first.strip_prefix("⏺").unwrap_or(first).trim();
     if !after_marker.is_empty() {
@@ -196,11 +244,9 @@ fn extract_last_response(lines: &[&str]) -> Option<String> {
 
     for line in &lines[start + 1..] {
         let trimmed = line.trim();
-        // Stop at prompt
         if trimmed.starts_with("❯") {
             break;
         }
-        // Stop at heavy separator (the ones between response and prompt area)
         if trimmed.len() > 20 && trimmed.chars().all(|c| c == '─') {
             break;
         }

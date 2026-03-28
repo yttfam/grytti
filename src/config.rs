@@ -4,11 +4,24 @@ use std::path::Path;
 #[derive(Debug, Deserialize)]
 pub struct Config {
     pub mqtt: MqttConfig,
-    pub telegram: TelegramConfig,
     #[serde(default = "default_api_config")]
     pub api: ApiConfig,
-    /// Session ID to bridge (single session for now)
+    #[serde(default = "default_debounce")]
+    pub debounce_ms: u64,
+
+    // Single-session backwards compat
+    pub session_id: Option<String>,
+    pub telegram: Option<TelegramConfig>,
+
+    // Multi-session
+    #[serde(default)]
+    pub sessions: Vec<SessionConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SessionConfig {
     pub session_id: String,
+    pub telegram: TelegramConfig,
     #[serde(default = "default_debounce")]
     pub debounce_ms: u64,
 }
@@ -24,7 +37,7 @@ pub struct MqttConfig {
     pub password: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct TelegramConfig {
     pub bot_token: String,
     #[serde(default)]
@@ -37,11 +50,8 @@ pub struct ApiConfig {
     pub bind: String,
     #[serde(default = "default_api_port")]
     pub port: u16,
-    /// Hermytt registry URL for service announcement
     pub hermytt_registry: Option<String>,
-    /// Auth token for hermytt API
     pub hermytt_token: Option<String>,
-    /// How hermytt can reach grytti's API (e.g. "http://10.11.0.5:7780")
     pub endpoint: Option<String>,
 }
 
@@ -86,10 +96,24 @@ impl Config {
         if let Ok(pass) = std::env::var("GRYTTI_MQTT_PASS") {
             config.mqtt.password = Some(pass);
         }
-        if let Ok(token) = std::env::var("GRYTTI_TG_TOKEN") {
-            config.telegram.bot_token = token;
-        }
 
         Ok(config)
+    }
+
+    /// Resolve session configs — supports both single-session and multi-session formats
+    pub fn resolved_sessions(&self) -> Vec<SessionConfig> {
+        if !self.sessions.is_empty() {
+            return self.sessions.clone();
+        }
+        // Single-session backwards compat
+        if let (Some(ref sid), Some(ref tg)) = (&self.session_id, &self.telegram) {
+            vec![SessionConfig {
+                session_id: sid.clone(),
+                telegram: tg.clone(),
+                debounce_ms: self.debounce_ms,
+            }]
+        } else {
+            vec![]
+        }
     }
 }
