@@ -12,7 +12,7 @@ rumqttc = "0.24"
 vte = "0.13"
 
 # Telegram bot
-teloxide = { version = "0.13", features = ["macros"] }
+teloxide = { version = "0.13", default-features = false, features = ["macros", "rustls", "ctrlc_handler"] }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -28,7 +28,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # HTTP API
 axum = "0.7"
-reqwest = { version = "0.11", features = ["json"] }
+reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
 
 # Utilities
 anyhow = "1"

@@ -165,7 +165,7 @@ fn claude_state_str(state: &ClaudeState) -> &'static str {
 }
 
 /// Announce grytti to hermytt's service registry
-pub async fn announce_to_registry(registry_url: &str, endpoint: &str) {
+pub async fn announce_to_registry(registry_url: &str, endpoint: &str, token: Option<&str>) {
     let body = serde_json::json!({
         "name": "grytti",
         "role": "parser",
@@ -177,12 +177,11 @@ pub async fn announce_to_registry(registry_url: &str, endpoint: &str) {
     });
 
     let client = reqwest::Client::new();
-    match client
-        .post(&format!("{}/registry/announce", registry_url))
-        .json(&body)
-        .send()
-        .await
-    {
+    let mut req = client.post(&format!("{}/registry/announce", registry_url));
+    if let Some(t) = token {
+        req = req.header("X-Hermytt-Key", t);
+    }
+    match req.json(&body).send().await {
         Ok(resp) => {
             tracing::info!(status = %resp.status(), "announced to hermytt registry");
         }
@@ -193,11 +192,11 @@ pub async fn announce_to_registry(registry_url: &str, endpoint: &str) {
 }
 
 /// Run heartbeat loop — re-announce every 15s
-pub async fn heartbeat_loop(registry_url: String, endpoint: String) {
+pub async fn heartbeat_loop(registry_url: String, endpoint: String, token: Option<String>) {
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(15));
     loop {
         interval.tick().await;
-        announce_to_registry(&registry_url, &endpoint).await;
+        announce_to_registry(&registry_url, &endpoint, token.as_deref()).await;
     }
 }
 

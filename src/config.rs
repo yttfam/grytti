@@ -39,6 +39,8 @@ pub struct ApiConfig {
     pub port: u16,
     /// Hermytt registry URL for service announcement
     pub hermytt_registry: Option<String>,
+    /// Auth token for hermytt API
+    pub hermytt_token: Option<String>,
     /// How hermytt can reach grytti's API (e.g. "http://10.11.0.5:7780")
     pub endpoint: Option<String>,
 }
@@ -68,6 +70,7 @@ fn default_api_config() -> ApiConfig {
         bind: default_api_bind(),
         port: default_api_port(),
         hermytt_registry: None,
+        hermytt_token: None,
         endpoint: None,
     }
 }

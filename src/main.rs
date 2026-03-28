@@ -102,9 +102,10 @@ async fn main() -> Result<()> {
         let endpoint = config.api.endpoint.clone()
             .unwrap_or_else(|| format!("http://{}:{}", config.api.bind, config.api.port));
         let url = registry_url.clone();
+        let token = config.api.hermytt_token.clone();
         tokio::spawn(async move {
-            api::announce_to_registry(&url, &endpoint).await;
-            api::heartbeat_loop(url, endpoint).await;
+            api::announce_to_registry(&url, &endpoint, token.as_deref()).await;
+            api::heartbeat_loop(url, endpoint, token).await;
         });
     }
 
