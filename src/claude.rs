@@ -31,6 +31,8 @@ pub struct ClaudeScreen {
     pub login_url: Option<String>,
     /// Whether "Paste code here" prompt is visible
     pub awaiting_code: bool,
+    /// Whether "Login successful" is visible
+    pub login_success: bool,
 }
 
 // Spinner symbols Claude Code uses (rotating set)
@@ -63,6 +65,7 @@ pub fn parse_screen(snapshot: &str) -> ClaudeScreen {
     let mut has_idle_prompt = false;
     let mut has_not_logged_in = false;
     let mut has_login_menu = false;
+    let mut has_login_success = false;
 
     // Collect URL fragments across wrapped lines
     let mut url_fragments: Vec<String> = Vec::new();
@@ -92,6 +95,11 @@ pub fn parse_screen(snapshot: &str) -> ClaudeScreen {
         // "Not logged in" detection
         if trimmed.contains("Not logged in") {
             has_not_logged_in = true;
+        }
+
+        // Login success detection
+        if trimmed.contains("Login successful") || trimmed.contains("Authenticated") {
+            has_login_success = true;
         }
 
         // Login menu detection
@@ -169,6 +177,7 @@ pub fn parse_screen(snapshot: &str) -> ClaudeScreen {
         tool_block,
         login_url,
         awaiting_code,
+        login_success: has_login_success,
     }
 }
 

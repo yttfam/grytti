@@ -1,5 +1,6 @@
 use rumqttc::AsyncClient;
 use std::sync::Arc;
+use std::time::Instant;
 use teloxide::prelude::*;
 use tokio::sync::Mutex;
 
@@ -11,12 +12,8 @@ use crate::claude::ClaudeState;
 pub enum LoginState {
     /// No login in progress
     Idle,
-    /// Sent /login, waiting for menu
-    WaitingForMenu,
-    /// Menu visible, about to press Enter
-    SelectingOption,
-    /// Waiting for OAuth URL to appear
-    WaitingForUrl,
+    /// Login flow active — waiting for URL to appear
+    InProgress,
     /// URL sent to Telegram, waiting for user to paste code
     WaitingForCode,
 }
@@ -25,13 +22,19 @@ pub struct LoginFlow {
     pub state: LoginState,
     /// URL we sent to Telegram (to avoid resending)
     sent_url: Option<String>,
+    /// When we last started a login attempt (cooldown)
+    last_attempt: Option<Instant>,
 }
+
+/// Minimum seconds between login attempts
+const LOGIN_COOLDOWN_SECS: u64 = 30;
 
 impl LoginFlow {
     pub fn new() -> Self {
         Self {
             state: LoginState::Idle,
             sent_url: None,
+            last_attempt: None,
         }
     }
 
@@ -56,33 +59,29 @@ impl LoginFlow {
 
         match self.state {
             LoginState::Idle => {
-                // Detect "Not logged in" and auto-start login
                 if screen.state == ClaudeState::NotLoggedIn {
+                    // Cooldown check
+                    if let Some(last) = self.last_attempt {
+                        if last.elapsed().as_secs() < LOGIN_COOLDOWN_SECS {
+                            return true; // Still cooling down, consume but don't retry
+                        }
+                    }
+
                     tracing::info!("detected not logged in, starting login flow");
                     let _ = bot.send_message(chat_id, "Not logged in. Starting login...").await;
+                    self.last_attempt = Some(Instant::now());
+
+                    // Send /login, wait for menu, press Enter
                     send_stdin(&mqtt, &session_id, "/login\r").await;
-                    self.state = LoginState::WaitingForMenu;
-                    return true;
-                }
-            }
-            LoginState::WaitingForMenu => {
-                if screen.state == ClaudeState::LoginPrompt {
-                    tracing::info!("login menu visible, selecting option 1");
-                    // Small delay then press Enter (option 1 is pre-selected)
-                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                     send_stdin(&mqtt, &session_id, "\r").await;
-                    self.state = LoginState::SelectingOption;
+
+                    self.state = LoginState::InProgress;
                     return true;
                 }
             }
-            LoginState::SelectingOption => {
-                // Wait for URL or "Opening browser" text
-                if screen.login_url.is_some() || screen.awaiting_code {
-                    self.state = LoginState::WaitingForUrl;
-                }
-                return true;
-            }
-            LoginState::WaitingForUrl => {
+            LoginState::InProgress => {
+                // Check for URL appearing on screen
                 if let Some(ref url) = screen.login_url {
                     if self.sent_url.as_ref() != Some(url) {
                         tracing::info!(url_len = url.len(), "sending login URL to telegram");
@@ -95,16 +94,33 @@ impl LoginFlow {
                         self.state = LoginState::WaitingForCode;
                     }
                 }
-                return true;
+
+                // Timeout: if no URL after 30s, reset
+                if let Some(last) = self.last_attempt {
+                    if last.elapsed().as_secs() > 30 {
+                        tracing::warn!("login flow timed out waiting for URL");
+                        let _ = bot.send_message(chat_id, "Login timed out. Send any message to retry.").await;
+                        self.reset();
+                    }
+                }
+
+                return true; // Consume all updates while in progress
             }
             LoginState::WaitingForCode => {
-                // Code will be handled by the TG message handler — it detects
-                // we're in WaitingForCode and forwards the message as the code.
-                // Once Claude is logged in, we'll see Idle state.
+                // Check if login succeeded — need to press Escape to dismiss the success screen
+                if screen.login_success {
+                    tracing::info!("login successful, pressing escape to dismiss");
+                    let _ = bot.send_message(chat_id, "Logged in!").await;
+                    send_stdin(&mqtt, &session_id, "\x1b").await;
+                    self.reset();
+                    return false;
+                }
+                // Also check if we're back to idle (login completed and auto-dismissed)
                 if screen.state == ClaudeState::Idle {
                     tracing::info!("login complete");
                     let _ = bot.send_message(chat_id, "Logged in!").await;
                     self.reset();
+                    return false;
                 }
                 return true;
             }
