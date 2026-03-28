@@ -4,7 +4,7 @@ use std::time::Instant;
 use teloxide::prelude::*;
 use tokio::sync::Mutex;
 
-use crate::api::AppState;
+use crate::api::SessionState;
 use crate::claude::ClaudeState;
 
 /// Login flow state machine
@@ -43,7 +43,7 @@ impl LoginFlow {
     pub async fn on_screen_update(
         &mut self,
         bot: &Bot,
-        app_state: &Arc<AppState>,
+        app_state: &Arc<SessionState>,
         screen: &crate::claude::ClaudeScreen,
     ) -> bool {
         let chat_id = {

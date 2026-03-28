@@ -6,35 +6,31 @@ use teloxide::prelude::*;
 use teloxide::types::ChatAction;
 use tokio::sync::Mutex;
 
-use crate::api::AppState;
+use crate::api::SessionState;
 use crate::claude::{ClaudeScreen, ClaudeState, DetectedProcess};
 
 /// Shared state between the Telegram bot and the MQTT bridge
 pub struct BotState {
     pub mqtt_client: AsyncClient,
     pub session_id: String,
-    /// Last known Claude state
     pub last_state: ClaudeState,
-    /// Last detected process
     pub last_process: DetectedProcess,
-    /// Last response we sent to Telegram (to avoid duplicates)
     pub last_sent_response: String,
-    /// Chat ID to send updates to (set on first message)
     pub chat_id: Option<ChatId>,
 }
 
 pub async fn run_bot(
     token: &str,
     state: Arc<Mutex<BotState>>,
-    app_state: Arc<AppState>,
+    session_state: Arc<SessionState>,
+    mqtt_client: AsyncClient,
 ) -> Result<()> {
     let bot = Bot::new(token);
 
-    let state_for_handler = state.clone();
-
     let handler = Update::filter_message().endpoint(
         move |bot: Bot, msg: Message, state: Arc<Mutex<BotState>>| {
-            let app = app_state.clone();
+            let ss = session_state.clone();
+            let mqtt = mqtt_client.clone();
             async move {
                 let text = match msg.text() {
                     Some(t) => t.to_string(),
@@ -50,15 +46,13 @@ pub async fn run_bot(
 
                 // Check if login flow is waiting for a code
                 let is_waiting_for_code = {
-                    let lf = app.login_flow.lock().await;
+                    let lf = ss.login_flow.lock().await;
                     lf.is_waiting_for_code()
                 };
 
-                let session_id = app.mutable.lock().await.session_id.clone();
-                let mqtt = state.lock().await.mqtt_client.clone();
+                let session_id = ss.mutable.lock().await.session_id.clone();
 
                 if is_waiting_for_code {
-                    // Forward as OAuth code — paste into the "Paste code here" prompt
                     tracing::info!("forwarding auth code to Claude");
                     let _ = bot.send_message(msg.chat.id, "Sending auth code...").await;
                     let mut data = text.into_bytes();
@@ -72,7 +66,6 @@ pub async fn run_bot(
                         )
                         .await;
                 } else {
-                    // Normal message — send typing + inject into Claude
                     let _ = bot.send_chat_action(msg.chat.id, ChatAction::Typing).await;
                     let mut data = text.into_bytes();
                     data.push(b'\r');
@@ -96,7 +89,7 @@ pub async fn run_bot(
     );
 
     Dispatcher::builder(bot.clone(), handler)
-        .dependencies(teloxide::dptree::deps![state_for_handler])
+        .dependencies(teloxide::dptree::deps![state])
         .enable_ctrlc_handler()
         .build()
         .dispatch()
@@ -116,18 +109,15 @@ pub async fn on_screen_update(
         None => return,
     };
 
-    // State transition: became thinking → send typing indicator
     if screen.state == ClaudeState::Thinking && state.last_state != ClaudeState::Thinking {
         tracing::info!("claude is thinking");
         let _ = bot.send_chat_action(chat_id, ChatAction::Typing).await;
     }
 
-    // Keep sending typing while thinking
     if screen.state == ClaudeState::Thinking {
         let _ = bot.send_chat_action(chat_id, ChatAction::Typing).await;
     }
 
-    // State transition: response available and different from last sent
     if screen.state == ClaudeState::Idle {
         if let Some(ref response) = screen.response {
             if *response != state.last_sent_response && !response.is_empty() {
