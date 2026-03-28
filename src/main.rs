@@ -231,6 +231,14 @@ async fn main() -> Result<()> {
 
                             *rt.app_state.last_snapshot.lock().await = snapshot.clone();
                             rt.last_published = snapshot;
+                        } else {
+                            // Snapshot unchanged — but keep sending typing if still thinking
+                            let state = rt.bot_state.lock().await;
+                            if state.last_state == claude::ClaudeState::Thinking {
+                                if let Some(chat_id) = state.chat_id {
+                                    let _ = rt.tg_bot.send_chat_action(chat_id, teloxide::types::ChatAction::Typing).await;
+                                }
+                            }
                         }
                     }
                 }
