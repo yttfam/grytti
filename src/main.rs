@@ -82,6 +82,7 @@ async fn main() -> Result<()> {
             mqtt_client: client.clone(),
             session_id: sc.session_id.clone(),
             last_state: claude::ClaudeState::Unknown,
+            last_process: claude::DetectedProcess::Unknown,
             last_sent_response: String::new(),
             chat_id: None,
         }));

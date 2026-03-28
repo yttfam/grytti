@@ -7,7 +7,7 @@ use teloxide::types::ChatAction;
 use tokio::sync::Mutex;
 
 use crate::api::AppState;
-use crate::claude::{ClaudeScreen, ClaudeState};
+use crate::claude::{ClaudeScreen, ClaudeState, DetectedProcess};
 
 /// Shared state between the Telegram bot and the MQTT bridge
 pub struct BotState {
@@ -15,6 +15,8 @@ pub struct BotState {
     pub session_id: String,
     /// Last known Claude state
     pub last_state: ClaudeState,
+    /// Last detected process
+    pub last_process: DetectedProcess,
     /// Last response we sent to Telegram (to avoid duplicates)
     pub last_sent_response: String,
     /// Chat ID to send updates to (set on first message)
@@ -136,6 +138,18 @@ pub async fn on_screen_update(
                 state.last_sent_response = response.clone();
             }
         }
+    }
+
+    // Process change notification
+    if screen.process != state.last_process && screen.process != DetectedProcess::Unknown {
+        let label = match screen.process {
+            DetectedProcess::ClaudeCode => "Claude Code",
+            DetectedProcess::Shell => "Shell",
+            DetectedProcess::Unknown => "Unknown",
+        };
+        tracing::info!(process = label, "process changed");
+        let _ = bot.send_message(chat_id, format!("[{}]", label)).await;
+        state.last_process = screen.process.clone();
     }
 
     state.last_state = screen.state.clone();

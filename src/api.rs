@@ -33,6 +33,7 @@ struct StatusResponse {
     session_id: String,
     uptime_secs: u64,
     claude_state: String,
+    process: String,
     telegram_chat_id: Option<i64>,
     debounce_ms: u64,
     messages_processed: u64,
@@ -84,10 +85,17 @@ async fn get_status(State(state): State<Arc<AppState>>) -> Json<StatusResponse> 
     let ms = state.mutable.lock().await;
     let claude_state = claude_state_str(&bot.last_state);
 
+    let process = match bot.last_process {
+        crate::claude::DetectedProcess::ClaudeCode => "claude_code",
+        crate::claude::DetectedProcess::Shell => "shell",
+        crate::claude::DetectedProcess::Unknown => "unknown",
+    };
+
     Json(StatusResponse {
         session_id: ms.session_id.clone(),
         uptime_secs: state.start_time.elapsed().as_secs(),
         claude_state: claude_state.to_string(),
+        process: process.to_string(),
         telegram_chat_id: bot.chat_id.map(|c| c.0),
         debounce_ms: ms.debounce_ms,
         messages_processed: state.messages_processed.load(Ordering::Relaxed),

@@ -1,3 +1,5 @@
+use serde::Serialize;
+
 /// Claude CLI state detection from grid snapshots.
 /// Parses the TUI output to detect state transitions and extract responses.
 
@@ -17,10 +19,19 @@ pub enum ClaudeState {
     Unknown,
 }
 
+/// What process appears to be running in the terminal
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub enum DetectedProcess {
+    ClaudeCode,
+    Shell,
+    Unknown,
+}
+
 /// Parsed snapshot of Claude CLI's current screen
 #[derive(Debug, Clone)]
 pub struct ClaudeScreen {
     pub state: ClaudeState,
+    pub process: DetectedProcess,
     /// The latest response block (text after ⏺), if any
     pub response: Option<String>,
     /// The current spinner text, if thinking
@@ -162,10 +173,31 @@ pub fn parse_screen(snapshot: &str) -> ClaudeScreen {
         state = ClaudeState::Idle;
     }
 
+    // Detect process
+    let process = if has_idle_prompt || has_esc_to_interrupt || has_login_menu || awaiting_code {
+        DetectedProcess::ClaudeCode
+    } else {
+        // Check for shell prompt patterns
+        let has_shell_prompt = lines.iter().any(|l| {
+            let t = l.trim();
+            // Common shell prompt patterns
+            (t.contains("@") && (t.ends_with('$') || t.ends_with('%') || t.ends_with('#')))
+                || (t.contains("@") && t.contains(":") && t.contains("$"))
+        });
+        if has_shell_prompt {
+            DetectedProcess::Shell
+        } else if state != ClaudeState::Unknown {
+            DetectedProcess::ClaudeCode
+        } else {
+            DetectedProcess::Unknown
+        }
+    };
+
     let response = extract_turn_response(&lines);
 
     ClaudeScreen {
         state,
+        process,
         response,
         spinner_text,
         tool_block,
