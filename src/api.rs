@@ -83,6 +83,14 @@ struct ConfigUpdate {
     debounce_ms: Option<u64>,
 }
 
+#[derive(Deserialize)]
+struct SessionUpdate {
+    session_id: Option<String>,
+    debounce_ms: Option<u64>,
+    #[allow(dead_code)]
+    bot_token: Option<String>, // TODO: runtime bot token change
+}
+
 #[derive(Serialize)]
 struct OkResponse {
     ok: bool,
@@ -152,14 +160,20 @@ async fn get_session_detail(
 async fn put_session(
     State(state): State<Arc<GlobalState>>,
     Path(session_id): Path<String>,
-    Json(update): Json<ConfigUpdate>,
+    Json(update): Json<SessionUpdate>,
 ) -> StatusCode {
-    let sessions = state.sessions.lock().await;
-    let ss = match sessions.get(&session_id) {
-        Some(s) => s,
-        None => return StatusCode::NOT_FOUND,
+    let ss = {
+        let sessions = state.sessions.lock().await;
+        match sessions.get(&session_id) {
+            Some(s) => s.clone(),
+            None => return StatusCode::NOT_FOUND,
+        }
     };
     let mut ms = ss.mutable.lock().await;
+    if let Some(ref sid) = update.session_id {
+        tracing::info!(session = %session_id, new_session_id = %sid, "session_id updated via API");
+        ms.session_id = sid.clone();
+    }
     if let Some(d) = update.debounce_ms {
         tracing::info!(session = %session_id, debounce_ms = d, "debounce updated via API");
         ms.debounce_ms = d;
@@ -168,11 +182,18 @@ async fn put_session(
 }
 
 async fn delete_session(
-    State(_state): State<Arc<GlobalState>>,
-    Path(_session_id): Path<String>,
+    State(state): State<Arc<GlobalState>>,
+    Path(session_id): Path<String>,
 ) -> StatusCode {
-    // TODO: runtime session removal (need to stop TG bot task)
-    StatusCode::NOT_IMPLEMENTED
+    let mut sessions = state.sessions.lock().await;
+    if sessions.remove(&session_id).is_some() {
+        tracing::info!(session = %session_id, "session removed via API");
+        // The TG bot task will stop on its own when the Arc<BotState> drops
+        // and the dispatcher's next poll fails
+        StatusCode::OK
+    } else {
+        StatusCode::NOT_FOUND
+    }
 }
 
 async fn send_to_session(
