@@ -51,9 +51,10 @@ async fn main() -> Result<()> {
         }
     });
 
-    let sessions = vec![session_id.clone()];
-    mqtt::subscribe(&client, &sessions).await?;
-    mqtt::subscribe_meta(&client, &sessions).await?;
+    // Subscribe to all sessions (wildcard) — session_id filtering happens in the main loop
+    // so we can switch sessions via API without resubscribing
+    mqtt::subscribe(&client, &[]).await?;
+    mqtt::subscribe_meta(&client, &[]).await?;
 
     // Telegram bot state
     let bot_state = Arc::new(Mutex::new(BotState {
