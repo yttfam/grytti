@@ -64,7 +64,7 @@ async fn main() -> Result<()> {
 
     let mut bot_tokens: HashMap<String, String> = HashMap::new();
     for sc in &session_configs {
-        let ss = create_session_state(&client, &sc.session_id, sc.telegram.bot_token.clone(), sc.debounce_ms);
+        let ss = create_session_state(&client, &sc.session_id, sc.telegram.bot_token.clone(), sc.debounce_ms, sc.chat_id);
         bot_tokens.insert(sc.session_id.clone(), sc.telegram.bot_token.clone());
         session_states.insert(sc.session_id.clone(), ss);
         tracing::info!(session = %sc.session_id, "session initialized");
@@ -204,6 +204,7 @@ fn create_session_state(
     session_id: &str,
     bot_token: String,
     debounce_ms: u64,
+    chat_id: Option<i64>,
 ) -> Arc<api::SessionState> {
     let bot_state = Arc::new(Mutex::new(BotState {
         mqtt_client: mqtt_client.clone(),
@@ -211,7 +212,7 @@ fn create_session_state(
         last_state: claude::ClaudeState::Unknown,
         last_process: claude::DetectedProcess::Unknown,
         last_sent_response: String::new(),
-        chat_id: None,
+        chat_id: chat_id.map(teloxide::types::ChatId),
     }));
 
     let tg_bot = Bot::new(&bot_token);

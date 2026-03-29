@@ -24,6 +24,8 @@ pub struct SessionConfig {
     pub telegram: TelegramConfig,
     #[serde(default = "default_debounce")]
     pub debounce_ms: u64,
+    /// Persisted chat ID so responses work immediately after restart
+    pub chat_id: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -111,6 +113,7 @@ impl Config {
                 session_id: sid.clone(),
                 telegram: tg.clone(),
                 debounce_ms: self.debounce_ms,
+                chat_id: None,
             }]
         } else {
             vec![]

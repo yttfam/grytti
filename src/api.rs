@@ -505,11 +505,14 @@ async fn persist_sessions(state: &GlobalState) {
     let mut session_configs = Vec::new();
     for (key, ss) in sessions.iter() {
         let ms = ss.mutable.lock().await;
+        let bot = ss.bot_state.lock().await;
         let token = tokens.get(key).cloned().unwrap_or_default();
+        let chat_id = bot.chat_id.map(|c| c.0);
         session_configs.push(serde_json::json!({
             "session_id": ms.session_id,
             "bot_token": token,
             "debounce_ms": ms.debounce_ms,
+            "chat_id": chat_id,
         }));
     }
     drop(sessions);
@@ -536,6 +539,10 @@ async fn persist_sessions(state: &GlobalState) {
             let mut table = toml::Table::new();
             table.insert("session_id".into(), toml::Value::String(sc["session_id"].as_str().unwrap_or("").to_string()));
             table.insert("debounce_ms".into(), toml::Value::Integer(sc["debounce_ms"].as_u64().unwrap_or(200) as i64));
+
+            if let Some(cid) = sc["chat_id"].as_i64() {
+                table.insert("chat_id".into(), toml::Value::Integer(cid));
+            }
 
             let mut tg = toml::Table::new();
             tg.insert("bot_token".into(), toml::Value::String(sc["bot_token"].as_str().unwrap_or("").to_string()));
