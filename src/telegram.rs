@@ -130,13 +130,32 @@ pub async fn on_screen_update(
         }
     }
 
-    // Shell mode: forward snapshot changes as responses
+    // Shell mode: forward only NEW output to Telegram
     if screen.process == DetectedProcess::Shell && screen.state == ClaudeState::Unknown {
         if let Some(ref response) = screen.response {
             if *response != state.last_sent_response && !response.is_empty() {
-                tracing::info!(len = response.len(), "sending shell output to telegram");
-                for chunk in chunk_message(response, 4096) {
-                    let _ = bot.send_message(chat_id, chunk).await;
+                // Send only the part that's new (diff from last sent)
+                let new_content = if !state.last_sent_response.is_empty()
+                    && response.starts_with(&state.last_sent_response)
+                {
+                    // Response grew — send only the new tail
+                    response[state.last_sent_response.len()..].trim_start_matches('\n')
+                } else if !state.last_sent_response.is_empty()
+                    && response.contains(&state.last_sent_response)
+                {
+                    // Old content somewhere in new response — send after it
+                    let idx = response.find(&state.last_sent_response).unwrap()
+                        + state.last_sent_response.len();
+                    response[idx..].trim_start_matches('\n')
+                } else {
+                    response.as_str()
+                };
+
+                if !new_content.trim().is_empty() {
+                    tracing::info!(len = new_content.len(), "sending shell output to telegram");
+                    for chunk in chunk_message(new_content, 4096) {
+                        let _ = bot.send_message(chat_id, chunk).await;
+                    }
                 }
                 state.last_sent_response = response.clone();
             }
