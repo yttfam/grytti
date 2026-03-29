@@ -19,26 +19,12 @@ use teloxide::prelude::*;
 use tokio::sync::Mutex;
 use tokio::time::Instant;
 use tracing_subscriber::EnvFilter;
-use vte::Parser;
 
 use crate::config::Config;
 use crate::grid::Grid;
 use crate::login::LoginFlow;
 use crate::parser::GridPerformer;
 use crate::telegram::BotState;
-
-/// Per-session runtime (owned by the main loop, not shared)
-struct SessionRuntime {
-    /// Key in the sessions map
-    key: String,
-    vte_parser: Parser,
-    performer: GridPerformer,
-    last_update: Instant,
-    last_published: String,
-    tg_bot: Bot,
-    /// Shared session state (also in GlobalState.sessions)
-    ss: Arc<api::SessionState>,
-}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -73,56 +59,13 @@ async fn main() -> Result<()> {
     mqtt::subscribe(&client, &[]).await?;
     mqtt::subscribe_meta(&client, &[]).await?;
 
-    // Build global state
+    // Build sessions
     let mut session_states: HashMap<String, Arc<api::SessionState>> = HashMap::new();
-    let mut runtimes: Vec<SessionRuntime> = Vec::new();
 
     for sc in &session_configs {
-        let bot_state = Arc::new(Mutex::new(BotState {
-            mqtt_client: client.clone(),
-            session_id: sc.session_id.clone(),
-            last_state: claude::ClaudeState::Unknown,
-            last_process: claude::DetectedProcess::Unknown,
-            last_sent_response: String::new(),
-            chat_id: None,
-        }));
-
-        let ss = Arc::new(api::SessionState {
-            bot_state: bot_state.clone(),
-            mutable: Mutex::new(api::MutableState {
-                session_id: sc.session_id.clone(),
-                debounce_ms: sc.debounce_ms,
-            }),
-            messages_processed: AtomicU64::new(0),
-            last_snapshot: Mutex::new(String::new()),
-            login_flow: Mutex::new(LoginFlow::new()),
-        });
-
-        session_states.insert(sc.session_id.clone(), ss.clone());
-
-        // Spawn TG bot
-        let tg_token = sc.telegram.bot_token.clone();
-        let bot_state_tg = bot_state.clone();
-        let ss_tg = ss.clone();
-        let mqtt_client_tg = client.clone();
-        tokio::spawn(async move {
-            if let Err(e) = telegram::run_bot(&tg_token, bot_state_tg, ss_tg, mqtt_client_tg).await {
-                tracing::error!("telegram bot error: {}", e);
-            }
-        });
-
-        let tg_bot = Bot::new(&sc.telegram.bot_token);
+        let ss = create_session_state(&client, &sc.session_id, sc.telegram.bot_token.clone(), sc.debounce_ms);
+        session_states.insert(sc.session_id.clone(), ss);
         tracing::info!(session = %sc.session_id, "session initialized");
-
-        runtimes.push(SessionRuntime {
-            key: sc.session_id.clone(),
-            vte_parser: Parser::new(),
-            performer: GridPerformer::new(Grid::default()),
-            last_update: Instant::now(),
-            last_published: String::new(),
-            tg_bot,
-            ss,
-        });
     }
 
     let global_state = Arc::new(api::GlobalState {
@@ -167,23 +110,28 @@ async fn main() -> Result<()> {
                 let Some(msg) = msg else { break };
                 match msg {
                     mqtt::Message::Pty(pty) => {
-                        for rt in &mut runtimes {
-                            let ms = rt.ss.mutable.lock().await;
+                        let sessions = global_state.sessions.lock().await;
+                        for (_, ss) in sessions.iter() {
+                            let ms = ss.mutable.lock().await;
                             if pty.session_id == ms.session_id {
                                 drop(ms);
-                                GridPerformer::feed(&mut rt.vte_parser, &mut rt.performer, &pty.payload);
+                                let mut rt = ss.runtime.lock().await;
+                                let api::SessionRuntime { ref mut vte_parser, ref mut performer, .. } = *rt;
+                                GridPerformer::feed(vte_parser, performer, &pty.payload);
                                 rt.last_update = Instant::now();
-                                rt.ss.messages_processed.fetch_add(1, Ordering::Relaxed);
+                                ss.messages_processed.fetch_add(1, Ordering::Relaxed);
                                 break;
                             }
                         }
                     }
                     mqtt::Message::Meta(meta) => {
-                        for rt in &mut runtimes {
-                            let ms = rt.ss.mutable.lock().await;
+                        let sessions = global_state.sessions.lock().await;
+                        for (_, ss) in sessions.iter() {
+                            let ms = ss.mutable.lock().await;
                             if meta.session_id == ms.session_id {
                                 if let Some((cols, rows)) = meta.resize {
                                     tracing::info!("resize {} to {}x{}", meta.session_id, cols, rows);
+                                    let mut rt = ss.runtime.lock().await;
                                     rt.performer.grid.resize(cols, rows);
                                 }
                                 break;
@@ -193,12 +141,15 @@ async fn main() -> Result<()> {
                 }
             }
             _ = tick.tick() => {
-                for rt in &mut runtimes {
-                    let now = Instant::now();
-                    let ms = rt.ss.mutable.lock().await;
+                let sessions = global_state.sessions.lock().await;
+                for (key, ss) in sessions.iter() {
+                    let ms = ss.mutable.lock().await;
                     let current_debounce = Duration::from_millis(ms.debounce_ms);
                     let sid = ms.session_id.clone();
                     drop(ms);
+
+                    let mut rt = ss.runtime.lock().await;
+                    let now = Instant::now();
 
                     if now.duration_since(rt.last_update) >= current_debounce {
                         let snapshot = rt.performer.grid.snapshot();
@@ -213,26 +164,24 @@ async fn main() -> Result<()> {
                                 .await;
 
                             let screen = claude::parse_screen(&snapshot);
-                            tracing::debug!(session = %rt.key, state = ?screen.state, "claude state");
+                            tracing::debug!(session = %key, state = ?screen.state, "claude state");
 
-                            // Drive login flow
-                            let mut lf = rt.ss.login_flow.lock().await;
-                            let consumed = lf.on_screen_update(&rt.tg_bot, &rt.ss, &screen).await;
+                            let mut lf = ss.login_flow.lock().await;
+                            let consumed = lf.on_screen_update(&ss.tg_bot, ss, &screen).await;
                             drop(lf);
 
                             if !consumed {
-                                let mut state = rt.ss.bot_state.lock().await;
-                                telegram::on_screen_update(&rt.tg_bot, &mut state, &screen).await;
+                                let mut state = ss.bot_state.lock().await;
+                                telegram::on_screen_update(&ss.tg_bot, &mut state, &screen).await;
                             }
 
-                            *rt.ss.last_snapshot.lock().await = snapshot.clone();
+                            *ss.last_snapshot.lock().await = snapshot.clone();
                             rt.last_published = snapshot;
                         } else {
-                            // Keep typing alive even when snapshot unchanged
-                            let state = rt.ss.bot_state.lock().await;
+                            let state = ss.bot_state.lock().await;
                             if state.last_state == claude::ClaudeState::Thinking {
                                 if let Some(chat_id) = state.chat_id {
-                                    let _ = rt.tg_bot.send_chat_action(chat_id, teloxide::types::ChatAction::Typing).await;
+                                    let _ = ss.tg_bot.send_chat_action(chat_id, teloxide::types::ChatAction::Typing).await;
                                 }
                             }
                         }
@@ -243,4 +192,53 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Create a new session state with TG bot spawned
+fn create_session_state(
+    mqtt_client: &rumqttc::AsyncClient,
+    session_id: &str,
+    bot_token: String,
+    debounce_ms: u64,
+) -> Arc<api::SessionState> {
+    let bot_state = Arc::new(Mutex::new(BotState {
+        mqtt_client: mqtt_client.clone(),
+        session_id: session_id.to_string(),
+        last_state: claude::ClaudeState::Unknown,
+        last_process: claude::DetectedProcess::Unknown,
+        last_sent_response: String::new(),
+        chat_id: None,
+    }));
+
+    let tg_bot = Bot::new(&bot_token);
+
+    let ss = Arc::new(api::SessionState {
+        bot_state: bot_state.clone(),
+        mutable: Mutex::new(api::MutableState {
+            session_id: session_id.to_string(),
+            debounce_ms,
+        }),
+        messages_processed: AtomicU64::new(0),
+        last_snapshot: Mutex::new(String::new()),
+        login_flow: Mutex::new(LoginFlow::new()),
+        runtime: Mutex::new(api::SessionRuntime {
+            vte_parser: vte::Parser::new(),
+            performer: GridPerformer::new(Grid::default()),
+            last_update: Instant::now(),
+            last_published: String::new(),
+        }),
+        tg_bot: tg_bot.clone(),
+    });
+
+    // Spawn TG bot
+    let bot_state_tg = bot_state.clone();
+    let ss_tg = ss.clone();
+    let mqtt_tg = mqtt_client.clone();
+    tokio::spawn(async move {
+        if let Err(e) = telegram::run_bot(&bot_token, bot_state_tg, ss_tg, mqtt_tg).await {
+            tracing::error!("telegram bot error: {}", e);
+        }
+    });
+
+    ss
 }

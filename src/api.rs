@@ -28,6 +28,17 @@ pub struct SessionState {
     pub messages_processed: AtomicU64,
     pub last_snapshot: Mutex<String>,
     pub login_flow: Mutex<crate::login::LoginFlow>,
+    /// VTE parser + grid for this session (used by main loop)
+    pub runtime: Mutex<SessionRuntime>,
+    /// Telegram bot instance for sending messages from the main loop
+    pub tg_bot: teloxide::Bot,
+}
+
+pub struct SessionRuntime {
+    pub vte_parser: vte::Parser,
+    pub performer: crate::parser::GridPerformer,
+    pub last_update: tokio::time::Instant,
+    pub last_published: String,
 }
 
 pub struct MutableState {
@@ -84,6 +95,18 @@ struct ConfigUpdate {
 }
 
 #[derive(Deserialize)]
+struct CreateSessionRequest {
+    session_id: String,
+    bot_token: String,
+    #[serde(default = "default_debounce")]
+    debounce_ms: u64,
+}
+
+fn default_debounce() -> u64 {
+    200
+}
+
+#[derive(Deserialize)]
 struct SessionUpdate {
     session_id: Option<String>,
     debounce_ms: Option<u64>,
@@ -104,10 +127,10 @@ struct ErrorResponse {
 pub fn router(state: Arc<GlobalState>) -> Router {
     Router::new()
         .route("/status", get(get_status))
-        .route("/sessions", get(list_sessions))
-        .route("/sessions/{session_id}", get(get_session_detail).put(put_session).delete(delete_session))
-        .route("/sessions/{session_id}/send", post(send_to_session))
-        .route("/sessions/{session_id}/snapshot", get(get_session_snapshot))
+        .route("/sessions", get(list_sessions).post(create_session))
+        .route("/sessions/:session_id", get(get_session_detail).put(put_session).delete(delete_session))
+        .route("/sessions/:session_id/send", post(send_to_session))
+        .route("/sessions/:session_id/snapshot", get(get_session_snapshot))
         // Legacy single-session routes (use first session)
         .route("/config", get(get_config).put(put_config))
         .route("/session", get(get_legacy_session))
@@ -117,6 +140,63 @@ pub fn router(state: Arc<GlobalState>) -> Router {
 }
 
 // --- Multi-session endpoints ---
+
+async fn create_session(
+    State(state): State<Arc<GlobalState>>,
+    Json(req): Json<CreateSessionRequest>,
+) -> Result<Json<OkResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let mut sessions = state.sessions.lock().await;
+    if sessions.contains_key(&req.session_id) {
+        return Err((StatusCode::CONFLICT, Json(ErrorResponse {
+            error: format!("session {} already exists", req.session_id),
+        })));
+    }
+
+    let bot_state = Arc::new(tokio::sync::Mutex::new(BotState {
+        mqtt_client: state.mqtt_client.clone(),
+        session_id: req.session_id.clone(),
+        last_state: ClaudeState::Unknown,
+        last_process: crate::claude::DetectedProcess::Unknown,
+        last_sent_response: String::new(),
+        chat_id: None,
+    }));
+
+    let tg_bot = teloxide::Bot::new(&req.bot_token);
+
+    let ss = Arc::new(SessionState {
+        bot_state: bot_state.clone(),
+        mutable: tokio::sync::Mutex::new(MutableState {
+            session_id: req.session_id.clone(),
+            debounce_ms: req.debounce_ms,
+        }),
+        messages_processed: std::sync::atomic::AtomicU64::new(0),
+        last_snapshot: tokio::sync::Mutex::new(String::new()),
+        login_flow: tokio::sync::Mutex::new(crate::login::LoginFlow::new()),
+        runtime: tokio::sync::Mutex::new(SessionRuntime {
+            vte_parser: vte::Parser::new(),
+            performer: crate::parser::GridPerformer::new(crate::grid::Grid::default()),
+            last_update: tokio::time::Instant::now(),
+            last_published: String::new(),
+        }),
+        tg_bot,
+    });
+
+    // Spawn TG bot for this session
+    let tg_token = req.bot_token.clone();
+    let bot_state_tg = bot_state.clone();
+    let ss_tg = ss.clone();
+    let mqtt_client_tg = state.mqtt_client.clone();
+    tokio::spawn(async move {
+        if let Err(e) = crate::telegram::run_bot(&tg_token, bot_state_tg, ss_tg, mqtt_client_tg).await {
+            tracing::error!("telegram bot error: {}", e);
+        }
+    });
+
+    tracing::info!(session = %req.session_id, "session created via API");
+    sessions.insert(req.session_id, ss);
+
+    Ok(Json(OkResponse { ok: true }))
+}
 
 async fn list_sessions(State(state): State<Arc<GlobalState>>) -> Json<SessionsResponse> {
     let sessions = state.sessions.lock().await;
