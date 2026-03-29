@@ -241,13 +241,10 @@ async fn put_session(
     State(state): State<Arc<GlobalState>>,
     Path(session_id): Path<String>,
     Json(update): Json<SessionUpdate>,
-) -> StatusCode {
+) -> Result<Json<OkResponse>, StatusCode> {
     let ss = {
         let sessions = state.sessions.lock().await;
-        match sessions.get(&session_id) {
-            Some(s) => s.clone(),
-            None => return StatusCode::NOT_FOUND,
-        }
+        sessions.get(&session_id).cloned().ok_or(StatusCode::NOT_FOUND)?
     };
     let mut ms = ss.mutable.lock().await;
     if let Some(ref sid) = update.session_id {
@@ -258,21 +255,19 @@ async fn put_session(
         tracing::info!(session = %session_id, debounce_ms = d, "debounce updated via API");
         ms.debounce_ms = d;
     }
-    StatusCode::OK
+    Ok(Json(OkResponse { ok: true }))
 }
 
 async fn delete_session(
     State(state): State<Arc<GlobalState>>,
     Path(session_id): Path<String>,
-) -> StatusCode {
+) -> Result<Json<OkResponse>, StatusCode> {
     let mut sessions = state.sessions.lock().await;
     if sessions.remove(&session_id).is_some() {
         tracing::info!(session = %session_id, "session removed via API");
-        // The TG bot task will stop on its own when the Arc<BotState> drops
-        // and the dispatcher's next poll fails
-        StatusCode::OK
+        Ok(Json(OkResponse { ok: true }))
     } else {
-        StatusCode::NOT_FOUND
+        Err(StatusCode::NOT_FOUND)
     }
 }
 
