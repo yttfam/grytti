@@ -193,7 +193,11 @@ pub fn parse_screen(snapshot: &str) -> ClaudeScreen {
         }
     };
 
-    let response = extract_turn_response(&lines);
+    let response = if process == DetectedProcess::Shell {
+        extract_shell_output(&lines)
+    } else {
+        extract_turn_response(&lines)
+    };
 
     ClaudeScreen {
         state,
@@ -293,5 +297,46 @@ fn extract_last_response_block(lines: &[&str]) -> Option<String> {
         None
     } else {
         Some(response_lines.join("\n"))
+    }
+}
+
+/// Extract shell output — everything between the second-to-last prompt and the last prompt.
+fn extract_shell_output(lines: &[&str]) -> Option<String> {
+    let is_shell_prompt = |line: &str| -> bool {
+        let t = line.trim();
+        (t.contains('@') && (t.ends_with('$') || t.ends_with('%') || t.ends_with('#')))
+            || (t.contains('@') && t.contains(':') && t.contains('$'))
+    };
+
+    let mut prompt_positions: Vec<usize> = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        if is_shell_prompt(line) {
+            prompt_positions.push(i);
+        }
+    }
+
+    if prompt_positions.len() < 2 {
+        return None;
+    }
+
+    let cmd_prompt = prompt_positions[prompt_positions.len() - 2];
+    let current_prompt = prompt_positions[prompt_positions.len() - 1];
+
+    let mut output_lines = Vec::new();
+    for i in (cmd_prompt + 1)..current_prompt {
+        output_lines.push(lines[i].trim_end().to_string());
+    }
+
+    while output_lines.first().map_or(false, |l| l.trim().is_empty()) {
+        output_lines.remove(0);
+    }
+    while output_lines.last().map_or(false, |l| l.trim().is_empty()) {
+        output_lines.pop();
+    }
+
+    if output_lines.is_empty() {
+        None
+    } else {
+        Some(output_lines.join("\n"))
     }
 }

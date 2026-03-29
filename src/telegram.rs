@@ -130,6 +130,19 @@ pub async fn on_screen_update(
         }
     }
 
+    // Shell mode: forward snapshot changes as responses
+    if screen.process == DetectedProcess::Shell && screen.state == ClaudeState::Unknown {
+        if let Some(ref response) = screen.response {
+            if *response != state.last_sent_response && !response.is_empty() {
+                tracing::info!(len = response.len(), "sending shell output to telegram");
+                for chunk in chunk_message(response, 4096) {
+                    let _ = bot.send_message(chat_id, chunk).await;
+                }
+                state.last_sent_response = response.clone();
+            }
+        }
+    }
+
     // Process change notification
     if screen.process != state.last_process && screen.process != DetectedProcess::Unknown {
         let label = match screen.process {
