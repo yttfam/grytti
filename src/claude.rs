@@ -97,8 +97,11 @@ pub fn parse_screen(snapshot: &str) -> ClaudeScreen {
             continue;
         }
 
-        // "? for shortcuts" = idle state indicator
-        if trimmed == "? for shortcuts" {
+        // Idle state indicators
+        if trimmed == "? for shortcuts"
+            || trimmed.contains("accept edits on")
+            || trimmed.contains("for shortcuts")
+        {
             has_idle_prompt = true;
             continue;
         }
