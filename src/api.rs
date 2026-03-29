@@ -19,6 +19,9 @@ pub struct GlobalState {
     pub mqtt_host: String,
     pub mqtt_port: u16,
     pub start_time: std::time::Instant,
+    pub config_path: std::path::PathBuf,
+    /// Bot tokens per session key (for config persistence)
+    pub bot_tokens: Mutex<HashMap<String, String>>,
 }
 
 /// Per-session state
@@ -193,7 +196,11 @@ async fn create_session(
     });
 
     tracing::info!(session = %req.session_id, "session created via API");
+    // Store bot token for persistence
+    state.bot_tokens.lock().await.insert(req.session_id.clone(), req.bot_token);
     sessions.insert(req.session_id, ss);
+    drop(sessions);
+    persist_sessions(&state).await;
 
     Ok(Json(OkResponse { ok: true }))
 }
@@ -255,6 +262,8 @@ async fn put_session(
         tracing::info!(session = %session_id, debounce_ms = d, "debounce updated via API");
         ms.debounce_ms = d;
     }
+    drop(ms);
+    persist_sessions(&state).await;
     Ok(Json(OkResponse { ok: true }))
 }
 
@@ -265,6 +274,9 @@ async fn delete_session(
     let mut sessions = state.sessions.lock().await;
     if sessions.remove(&session_id).is_some() {
         tracing::info!(session = %session_id, "session removed via API");
+        state.bot_tokens.lock().await.remove(&session_id);
+        drop(sessions);
+        persist_sessions(&state).await;
         Ok(Json(OkResponse { ok: true }))
     } else {
         Err(StatusCode::NOT_FOUND)
@@ -482,6 +494,61 @@ pub async fn heartbeat_loop(registry_url: String, endpoint: String, token: Optio
     loop {
         interval.tick().await;
         announce_to_registry(&registry_url, &endpoint, token.as_deref()).await;
+    }
+}
+
+/// Persist current sessions to the config file so they survive restarts.
+async fn persist_sessions(state: &GlobalState) {
+    let sessions = state.sessions.lock().await;
+    let tokens = state.bot_tokens.lock().await;
+
+    let mut session_configs = Vec::new();
+    for (key, ss) in sessions.iter() {
+        let ms = ss.mutable.lock().await;
+        let token = tokens.get(key).cloned().unwrap_or_default();
+        session_configs.push(serde_json::json!({
+            "session_id": ms.session_id,
+            "bot_token": token,
+            "debounce_ms": ms.debounce_ms,
+        }));
+    }
+    drop(sessions);
+
+    // Read current config, update sessions section, write back
+    let config_path = &state.config_path;
+    let content = match std::fs::read_to_string(config_path) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("failed to read config for persist: {}", e);
+            return;
+        }
+    };
+
+    // Parse, update sessions, rewrite
+    if let Ok(mut doc) = content.parse::<toml::Table>() {
+        // Remove old single-session fields
+        doc.remove("session_id");
+        doc.remove("telegram");
+
+        // Build sessions array
+        let mut arr = toml::value::Array::new();
+        for sc in &session_configs {
+            let mut table = toml::Table::new();
+            table.insert("session_id".into(), toml::Value::String(sc["session_id"].as_str().unwrap_or("").to_string()));
+            table.insert("debounce_ms".into(), toml::Value::Integer(sc["debounce_ms"].as_u64().unwrap_or(200) as i64));
+
+            let mut tg = toml::Table::new();
+            tg.insert("bot_token".into(), toml::Value::String(sc["bot_token"].as_str().unwrap_or("").to_string()));
+            table.insert("telegram".into(), toml::Value::Table(tg));
+
+            arr.push(toml::Value::Table(table));
+        }
+        doc.insert("sessions".into(), toml::Value::Array(arr));
+
+        match std::fs::write(config_path, toml::to_string_pretty(&doc).unwrap_or_default()) {
+            Ok(_) => tracing::info!("persisted {} sessions to config", session_configs.len()),
+            Err(e) => tracing::warn!("failed to write config: {}", e),
+        }
     }
 }
 

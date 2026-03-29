@@ -62,8 +62,10 @@ async fn main() -> Result<()> {
     // Build sessions
     let mut session_states: HashMap<String, Arc<api::SessionState>> = HashMap::new();
 
+    let mut bot_tokens: HashMap<String, String> = HashMap::new();
     for sc in &session_configs {
         let ss = create_session_state(&client, &sc.session_id, sc.telegram.bot_token.clone(), sc.debounce_ms);
+        bot_tokens.insert(sc.session_id.clone(), sc.telegram.bot_token.clone());
         session_states.insert(sc.session_id.clone(), ss);
         tracing::info!(session = %sc.session_id, "session initialized");
     }
@@ -74,6 +76,8 @@ async fn main() -> Result<()> {
         mqtt_host: config.mqtt.host.clone(),
         mqtt_port: config.mqtt.port,
         start_time: std::time::Instant::now(),
+        config_path: config_path.clone(),
+        bot_tokens: Mutex::new(bot_tokens),
     });
 
     // API
