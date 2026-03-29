@@ -97,11 +97,11 @@ pub fn parse_screen(snapshot: &str) -> ClaudeScreen {
             continue;
         }
 
-        // Idle state indicators
-        if trimmed == "? for shortcuts"
-            || trimmed.contains("accept edits on")
-            || trimmed.contains("for shortcuts")
-        {
+        // Idle: the `❯` prompt visible between separator lines means Claude is ready.
+        // We detect idle by the ABSENCE of "esc to interrupt" rather than
+        // matching specific hint text, since Claude Code has many bottom-bar variants
+        // (? for shortcuts, accept edits on, etc.)
+        if trimmed == "❯" {
             has_idle_prompt = true;
             continue;
         }
