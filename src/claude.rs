@@ -194,7 +194,8 @@ pub fn parse_screen(snapshot: &str) -> ClaudeScreen {
     };
 
     let response = if process == DetectedProcess::Shell {
-        extract_shell_output(&lines)
+        // Try prompt-based extraction first, fall back to everything above last prompt
+        extract_shell_output(&lines).or_else(|| extract_shell_snapshot(&lines))
     } else {
         extract_turn_response(&lines)
     };
@@ -324,6 +325,48 @@ fn extract_shell_output(lines: &[&str]) -> Option<String> {
 
     let mut output_lines = Vec::new();
     for i in (cmd_prompt + 1)..current_prompt {
+        output_lines.push(lines[i].trim_end().to_string());
+    }
+
+    while output_lines.first().map_or(false, |l| l.trim().is_empty()) {
+        output_lines.remove(0);
+    }
+    while output_lines.last().map_or(false, |l| l.trim().is_empty()) {
+        output_lines.pop();
+    }
+
+    if output_lines.is_empty() {
+        None
+    } else {
+        Some(output_lines.join("\n"))
+    }
+}
+
+/// Fallback for shell: grab everything above the last shell prompt.
+/// Used when the previous prompt scrolled off screen.
+fn extract_shell_snapshot(lines: &[&str]) -> Option<String> {
+    let is_shell_prompt = |line: &str| -> bool {
+        let t = line.trim();
+        (t.contains('@') && (t.ends_with('$') || t.ends_with('%') || t.ends_with('#')))
+            || (t.contains('@') && t.contains(':') && t.contains('$'))
+    };
+
+    // Find the last prompt
+    let mut last_prompt = None;
+    for (i, line) in lines.iter().enumerate() {
+        if is_shell_prompt(line) {
+            last_prompt = Some(i);
+        }
+    }
+
+    let prompt_idx = last_prompt?;
+    if prompt_idx == 0 {
+        return None;
+    }
+
+    // Grab everything above the last prompt, skip leading empty lines
+    let mut output_lines = Vec::new();
+    for i in 0..prompt_idx {
         output_lines.push(lines[i].trim_end().to_string());
     }
 
