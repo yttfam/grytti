@@ -14,7 +14,7 @@ Requires Rust 2021 edition (stable 1.85+).
 
 ```bash
 cp grytti.toml.example grytti.toml
-# edit grytti.toml — MQTT broker, Telegram token, session ID
+# edit grytti.toml — MQTT broker, session IDs. Telegram bot token optional.
 RUST_LOG=info cargo run
 ```
 
@@ -37,7 +37,9 @@ src/
 
 **Grid:** 2D array of cells tracking cursor position, scroll regions, and alternate screen buffer. Enough fidelity to reconstruct text from Claude Code's React Ink TUI.
 
-**State detection:** Scans grid snapshot for Claude CLI markers — spinner symbols + words (thinking), `⏺` (response), `❯` (idle prompt), `esc to interrupt` / `? for shortcuts` (activity indicators).
+**State detection:** Scans grid snapshot for Claude CLI markers — spinner symbols + words (thinking), `⏺` (response), `❯` (idle prompt), `esc to interrupt` (working). Also detects shell prompts for raw shell sessions.
+
+**Two modes:** Sessions with a Telegram bot token get a TG frontend (for humans). Sessions without run headless (for agents) — MQTT text bridge only.
 
 **Debounce:** 200ms quiet period before publishing. Prevents flooding during spinner animations (~60fps redraws).
 

@@ -1,4 +1,3 @@
-session_id = "your-session-id"
 # debounce_ms = 200
 
 [mqtt]
@@ -7,11 +6,24 @@ port = 1883
 # username = "mqtt"
 # password = "secret"
 
-[telegram]
-bot_token = "YOUR_BOT_TOKEN"
-allowed_chats = []
-
-[api]
-bind = "0.0.0.0"
-port = 7780
+# Optional: REST API + hermytt registry
+# [api]
+# bind = "0.0.0.0"
+# port = 7780
 # hermytt_registry = "http://localhost:7777"
+# hermytt_token = "your-hermytt-token"
+# endpoint = "http://your-ip:7780"
+
+# --- Sessions ---
+# Each session maps to a hermytt PTY session.
+# Telegram is optional — omit [sessions.telegram] for headless/agent mode.
+
+# Human session with Telegram bot
+[[sessions]]
+session_id = "your-session-id"
+[sessions.telegram]
+bot_token = "YOUR_BOT_TOKEN"
+
+# Headless session (MQTT only, no Telegram)
+# [[sessions]]
+# session_id = "agent-session-id"
