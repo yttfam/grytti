@@ -161,7 +161,10 @@ async fn main() -> Result<()> {
 
                     if now.duration_since(rt.last_update) >= current_debounce {
                         let snapshot = rt.performer.grid.snapshot();
-                        if snapshot != rt.last_published && !snapshot.is_empty() {
+                        if snapshot != rt.last_published
+                            && !snapshot.is_empty()
+                            && !claude::is_spinner_only_change(&rt.last_published, &snapshot)
+                        {
                             let _ = publish_client
                                 .publish(
                                     &format!("hermytt/{}/pty/text", sid),
@@ -188,11 +191,18 @@ async fn main() -> Result<()> {
 
                             *ss.last_snapshot.lock().await = snapshot.clone();
                             rt.last_published = snapshot;
-                        } else if let Some(ref tg_bot) = ss.tg_bot {
-                            let state = ss.bot_state.lock().await;
-                            if state.last_state == claude::ClaudeState::Thinking {
-                                if let Some(chat_id) = state.chat_id {
-                                    let _ = tg_bot.send_chat_action(chat_id, teloxide::types::ChatAction::Typing).await;
+                        } else {
+                            // Spinner-only change or no change — still update last_published
+                            // to avoid accumulating diffs, and keep typing alive
+                            if snapshot != rt.last_published && !snapshot.is_empty() {
+                                rt.last_published = snapshot;
+                            }
+                            if let Some(ref tg_bot) = ss.tg_bot {
+                                let state = ss.bot_state.lock().await;
+                                if state.last_state == claude::ClaudeState::Thinking {
+                                    if let Some(chat_id) = state.chat_id {
+                                        let _ = tg_bot.send_chat_action(chat_id, teloxide::types::ChatAction::Typing).await;
+                                    }
                                 }
                             }
                         }

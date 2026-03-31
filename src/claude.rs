@@ -1,5 +1,19 @@
 use serde::Serialize;
 
+/// Returns true if the only difference between two snapshots is a spinner animation.
+/// Spinner changes are single-character diffs (rotating symbol) — not real content.
+pub fn is_spinner_only_change(old: &str, new: &str) -> bool {
+    if old == new {
+        return false; // no change at all
+    }
+    if old.len() != new.len() {
+        return false; // length changed = real content
+    }
+
+    let diff_count = old.chars().zip(new.chars()).filter(|(a, b)| a != b).count();
+    diff_count == 1
+}
+
 /// Claude CLI state detection from grid snapshots.
 /// Parses the TUI output to detect state transitions and extract responses.
 
