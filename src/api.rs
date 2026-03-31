@@ -33,8 +33,8 @@ pub struct SessionState {
     pub login_flow: Mutex<crate::login::LoginFlow>,
     /// VTE parser + grid for this session (used by main loop)
     pub runtime: Mutex<SessionRuntime>,
-    /// Telegram bot instance for sending messages from the main loop
-    pub tg_bot: teloxide::Bot,
+    /// Telegram bot instance — None for headless (agent) sessions
+    pub tg_bot: Option<teloxide::Bot>,
 }
 
 pub struct SessionRuntime {
@@ -100,7 +100,7 @@ struct ConfigUpdate {
 #[derive(Deserialize)]
 struct CreateSessionRequest {
     session_id: String,
-    bot_token: String,
+    bot_token: Option<String>,
     #[serde(default = "default_debounce")]
     debounce_ms: u64,
 }
@@ -164,7 +164,7 @@ async fn create_session(
         chat_id: None,
     }));
 
-    let tg_bot = teloxide::Bot::new(&req.bot_token);
+    let tg_bot = req.bot_token.as_ref().map(|t| teloxide::Bot::new(t));
 
     let ss = Arc::new(SessionState {
         bot_state: bot_state.clone(),
@@ -184,20 +184,24 @@ async fn create_session(
         tg_bot,
     });
 
-    // Spawn TG bot for this session
-    let tg_token = req.bot_token.clone();
-    let bot_state_tg = bot_state.clone();
-    let ss_tg = ss.clone();
-    let mqtt_client_tg = state.mqtt_client.clone();
-    tokio::spawn(async move {
-        if let Err(e) = crate::telegram::run_bot(&tg_token, bot_state_tg, ss_tg, mqtt_client_tg).await {
-            tracing::error!("telegram bot error: {}", e);
-        }
-    });
+    // Spawn TG bot only if token provided
+    if let Some(ref token) = req.bot_token {
+        let tg_token = token.clone();
+        let bot_state_tg = bot_state.clone();
+        let ss_tg = ss.clone();
+        let mqtt_client_tg = state.mqtt_client.clone();
+        tokio::spawn(async move {
+            if let Err(e) = crate::telegram::run_bot(&tg_token, bot_state_tg, ss_tg, mqtt_client_tg).await {
+                tracing::error!("telegram bot error: {}", e);
+            }
+        });
+    }
 
-    tracing::info!(session = %req.session_id, "session created via API");
-    // Store bot token for persistence
-    state.bot_tokens.lock().await.insert(req.session_id.clone(), req.bot_token);
+    let mode = if req.bot_token.is_some() { "telegram" } else { "headless" };
+    tracing::info!(session = %req.session_id, mode = mode, "session created via API");
+    if let Some(token) = req.bot_token {
+        state.bot_tokens.lock().await.insert(req.session_id.clone(), token);
+    }
     sessions.insert(req.session_id, ss);
     drop(sessions);
     persist_sessions(&state).await;

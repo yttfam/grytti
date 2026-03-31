@@ -21,10 +21,10 @@ pub struct Config {
 #[derive(Debug, Clone, Deserialize)]
 pub struct SessionConfig {
     pub session_id: String,
-    pub telegram: TelegramConfig,
+    /// Optional — no token = headless agent mode (MQTT only)
+    pub telegram: Option<TelegramConfig>,
     #[serde(default = "default_debounce")]
     pub debounce_ms: u64,
-    /// Persisted chat ID so responses work immediately after restart
     pub chat_id: Option<i64>,
 }
 
@@ -108,10 +108,10 @@ impl Config {
             return self.sessions.clone();
         }
         // Single-session backwards compat
-        if let (Some(ref sid), Some(ref tg)) = (&self.session_id, &self.telegram) {
+        if let Some(ref sid) = self.session_id {
             vec![SessionConfig {
                 session_id: sid.clone(),
-                telegram: tg.clone(),
+                telegram: self.telegram.clone(),
                 debounce_ms: self.debounce_ms,
                 chat_id: None,
             }]

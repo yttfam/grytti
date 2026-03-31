@@ -64,10 +64,14 @@ async fn main() -> Result<()> {
 
     let mut bot_tokens: HashMap<String, String> = HashMap::new();
     for sc in &session_configs {
-        let ss = create_session_state(&client, &sc.session_id, sc.telegram.bot_token.clone(), sc.debounce_ms, sc.chat_id);
-        bot_tokens.insert(sc.session_id.clone(), sc.telegram.bot_token.clone());
+        let bot_token = sc.telegram.as_ref().map(|t| t.bot_token.clone());
+        let ss = create_session_state(&client, &sc.session_id, bot_token.clone(), sc.debounce_ms, sc.chat_id);
+        if let Some(ref token) = bot_token {
+            bot_tokens.insert(sc.session_id.clone(), token.clone());
+        }
         session_states.insert(sc.session_id.clone(), ss);
-        tracing::info!(session = %sc.session_id, "session initialized");
+        let mode = if bot_token.is_some() { "telegram" } else { "headless" };
+        tracing::info!(session = %sc.session_id, mode = mode, "session initialized");
     }
 
     let global_state = Arc::new(api::GlobalState {
@@ -170,22 +174,25 @@ async fn main() -> Result<()> {
                             let screen = claude::parse_screen(&snapshot);
                             tracing::debug!(session = %key, state = ?screen.state, "claude state");
 
-                            let mut lf = ss.login_flow.lock().await;
-                            let consumed = lf.on_screen_update(&ss.tg_bot, ss, &screen).await;
-                            drop(lf);
+                            // TG updates only if bot is configured
+                            if let Some(ref tg_bot) = ss.tg_bot {
+                                let mut lf = ss.login_flow.lock().await;
+                                let consumed = lf.on_screen_update(tg_bot, ss, &screen).await;
+                                drop(lf);
 
-                            if !consumed {
-                                let mut state = ss.bot_state.lock().await;
-                                telegram::on_screen_update(&ss.tg_bot, &mut state, &screen).await;
+                                if !consumed {
+                                    let mut state = ss.bot_state.lock().await;
+                                    telegram::on_screen_update(tg_bot, &mut state, &screen).await;
+                                }
                             }
 
                             *ss.last_snapshot.lock().await = snapshot.clone();
                             rt.last_published = snapshot;
-                        } else {
+                        } else if let Some(ref tg_bot) = ss.tg_bot {
                             let state = ss.bot_state.lock().await;
                             if state.last_state == claude::ClaudeState::Thinking {
                                 if let Some(chat_id) = state.chat_id {
-                                    let _ = ss.tg_bot.send_chat_action(chat_id, teloxide::types::ChatAction::Typing).await;
+                                    let _ = tg_bot.send_chat_action(chat_id, teloxide::types::ChatAction::Typing).await;
                                 }
                             }
                         }
@@ -198,11 +205,12 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Create a new session state with TG bot spawned
+/// Create a new session state. If bot_token is Some, spawns a Telegram bot.
+/// If None, session runs headless (MQTT only).
 fn create_session_state(
     mqtt_client: &rumqttc::AsyncClient,
     session_id: &str,
-    bot_token: String,
+    bot_token: Option<String>,
     debounce_ms: u64,
     chat_id: Option<i64>,
 ) -> Arc<api::SessionState> {
@@ -215,7 +223,7 @@ fn create_session_state(
         chat_id: chat_id.map(teloxide::types::ChatId),
     }));
 
-    let tg_bot = Bot::new(&bot_token);
+    let tg_bot = bot_token.as_ref().map(|t| Bot::new(t));
 
     let ss = Arc::new(api::SessionState {
         bot_state: bot_state.clone(),
@@ -232,18 +240,20 @@ fn create_session_state(
             last_update: Instant::now(),
             last_published: String::new(),
         }),
-        tg_bot: tg_bot.clone(),
+        tg_bot,
     });
 
-    // Spawn TG bot
-    let bot_state_tg = bot_state.clone();
-    let ss_tg = ss.clone();
-    let mqtt_tg = mqtt_client.clone();
-    tokio::spawn(async move {
-        if let Err(e) = telegram::run_bot(&bot_token, bot_state_tg, ss_tg, mqtt_tg).await {
-            tracing::error!("telegram bot error: {}", e);
-        }
-    });
+    // Spawn TG bot only if we have a token
+    if let Some(token) = bot_token {
+        let bot_state_tg = bot_state.clone();
+        let ss_tg = ss.clone();
+        let mqtt_tg = mqtt_client.clone();
+        tokio::spawn(async move {
+            if let Err(e) = telegram::run_bot(&token, bot_state_tg, ss_tg, mqtt_tg).await {
+                tracing::error!("telegram bot error: {}", e);
+            }
+        });
+    }
 
     ss
 }
