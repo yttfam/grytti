@@ -602,15 +602,46 @@ fn clean_response(lines: Vec<String>) -> Option<String> {
             .map(|l| if l.len() >= min_indent { &l[min_indent..] } else { l.as_str() })
             .collect();
 
-        // Collapse multiple consecutive blank lines into one
+        // Unwrap terminal-wrapped lines and collapse blank lines.
+        // Terminal wraps at ~80 cols mid-sentence. Blank lines = real paragraph breaks.
+        // Lines starting with special chars (⎿, -, *, •, digits) = keep as separate lines.
         let mut result = String::new();
         let mut prev_blank = false;
         for line in &dedented {
             let is_blank = line.trim().is_empty();
-            if is_blank && prev_blank { continue; }
-            if !result.is_empty() { result.push('\n'); }
-            result.push_str(line);
-            prev_blank = is_blank;
+            if is_blank {
+                if !prev_blank && !result.is_empty() {
+                    result.push_str("\n\n");
+                }
+                prev_blank = true;
+                continue;
+            }
+            prev_blank = false;
+
+            let trimmed = line.trim();
+            // Lines that should start a new line (not unwrapped)
+            let is_new_block = trimmed.starts_with('⎿')
+                || trimmed.starts_with('-')
+                || trimmed.starts_with('*')
+                || trimmed.starts_with('•')
+                || trimmed.starts_with("Bash(")
+                || trimmed.starts_with("Read(")
+                || trimmed.starts_with("Edit(")
+                || trimmed.starts_with("Write(")
+                || trimmed.starts_with("Glob(")
+                || trimmed.starts_with("Grep(")
+                || trimmed.chars().next().map_or(false, |c| c.is_ascii_digit() && trimmed.chars().nth(1) == Some('.'));
+
+            if result.is_empty() || is_new_block {
+                if !result.is_empty() && !result.ends_with('\n') {
+                    result.push('\n');
+                }
+                result.push_str(trimmed);
+            } else {
+                // Continuation of a wrapped line — join with space
+                result.push(' ');
+                result.push_str(trimmed);
+            }
         }
 
         // Trim trailing whitespace
