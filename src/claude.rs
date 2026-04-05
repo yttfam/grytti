@@ -143,6 +143,7 @@ pub fn parse_screen(snapshot: &str) -> ClaudeScreen {
     let mut awaiting_code = false;
 
     let mut has_esc_to_interrupt = false;
+    let mut has_esc_to_interrupt_stale = false;
     let mut has_idle_prompt = false;
     let mut has_not_logged_in = false;
     let mut has_login_menu = false;
@@ -164,9 +165,12 @@ pub fn parse_screen(snapshot: &str) -> ClaudeScreen {
         }
 
         // "esc to interrupt" = Claude is actively working
-        // Can appear standalone or embedded: "⏵⏵ accept edits on ... · esc to interrupt"
         if trimmed.contains("esc to interrupt") {
             has_esc_to_interrupt = true;
+            // When embedded in "accept edits on ... · esc to interrupt", it can be stale
+            if trimmed.contains("accept edits on") {
+                has_esc_to_interrupt_stale = true;
+            }
             continue;
         }
 
@@ -262,11 +266,11 @@ pub fn parse_screen(snapshot: &str) -> ClaudeScreen {
         state = ClaudeState::LoginPrompt;
     } else if has_not_logged_in && state == ClaudeState::Unknown {
         state = ClaudeState::NotLoggedIn;
-    } else if has_esc_to_interrupt {
-        // "esc to interrupt" = thinking or tool use in progress
+    } else if has_esc_to_interrupt && !(has_esc_to_interrupt_stale && has_idle_prompt) {
+        // "esc to interrupt" is reliable UNLESS it's embedded in "accept edits on"
+        // AND the ❯ prompt is also visible (stale bottom bar after response)
         state = ClaudeState::Thinking;
     } else if has_idle_prompt {
-        // "? for shortcuts" = idle, ready for input
         state = ClaudeState::Idle;
     }
 
