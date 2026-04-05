@@ -6,6 +6,7 @@ mod login;
 mod mqtt;
 mod parser;
 mod telegram;
+mod web;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -86,9 +87,10 @@ async fn main() -> Result<()> {
 
     // API
     let api_bind = format!("{}:{}", config.api.bind, config.api.port);
-    let api_router = api::router(global_state.clone());
+    let api_router = api::router(global_state.clone())
+        .merge(web::router(global_state.clone()));
     let listener = tokio::net::TcpListener::bind(&api_bind).await?;
-    tracing::info!("API listening on {}", api_bind);
+    tracing::info!("API + web listening on {}", api_bind);
 
     tokio::spawn(async move {
         if let Err(e) = axum::serve(listener, api_router).await {
