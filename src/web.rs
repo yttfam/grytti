@@ -74,11 +74,11 @@ async fn handle_ws(socket: WebSocket, session_id: String, state: Arc<GlobalState
         let snap = ss.last_snapshot.lock().await.clone();
         if !snap.is_empty() {
             let screen = crate::claude::parse_screen(&snap);
-            let bot = ss.bot_state.lock().await;
+            let br = ss.bridge.lock().await;
             let msg = serde_json::json!({
                 "type": "snapshot",
-                "state": state_str(&bot.last_state),
-                "process": proc_str(&bot.last_process),
+                "state": state_str(&br.last_state),
+                "process": proc_str(&br.last_process),
                 "response": screen.response,
             });
             let _ = sender.send(Message::Text(msg.to_string().into())).await;
@@ -93,10 +93,10 @@ async fn handle_ws(socket: WebSocket, session_id: String, state: Arc<GlobalState
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;
             let snap = ss_push.last_snapshot.lock().await.clone();
             if snap != last && !snap.is_empty() {
-                let bot = ss_push.bot_state.lock().await;
-                let st = state_str(&bot.last_state);
-                let pr = proc_str(&bot.last_process);
-                drop(bot);
+                let br = ss_push.bridge.lock().await;
+                let st = state_str(&br.last_state);
+                let pr = proc_str(&br.last_process);
+                drop(br);
 
                 let screen = crate::claude::parse_screen(&snap);
                 let msg = serde_json::json!({

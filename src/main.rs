@@ -1,4 +1,5 @@
 mod api;
+mod bridge;
 mod claude;
 mod config;
 mod grid;
@@ -21,11 +22,11 @@ use tokio::sync::Mutex;
 use tokio::time::Instant;
 use tracing_subscriber::EnvFilter;
 
+use crate::bridge::Bridge;
 use crate::config::Config;
 use crate::grid::Grid;
-use crate::login::LoginFlow;
 use crate::parser::GridPerformer;
-use crate::telegram::BotState;
+use crate::telegram::TgState;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -62,8 +63,8 @@ async fn main() -> Result<()> {
 
     // Build sessions
     let mut session_states: HashMap<String, Arc<api::SessionState>> = HashMap::new();
-
     let mut bot_tokens: HashMap<String, String> = HashMap::new();
+
     for sc in &session_configs {
         let bot_token = sc.telegram.as_ref()
             .map(|t| t.bot_token.clone())
@@ -87,7 +88,7 @@ async fn main() -> Result<()> {
         bot_tokens: Mutex::new(bot_tokens),
     });
 
-    // API
+    // API + Web
     let api_bind = format!("{}:{}", config.api.bind, config.api.port);
     let api_router = api::router(global_state.clone())
         .merge(web::router(global_state.clone()));
@@ -181,37 +182,47 @@ async fn main() -> Result<()> {
                             let screen = claude::parse_screen(&snapshot);
                             tracing::debug!(session = %key, state = ?screen.state, "claude state");
 
-                            // TG updates only if bot is configured
-                            {
-                                let tg_guard = ss.tg_bot.lock().await;
-                                if let Some(ref tg_bot) = *tg_guard {
-                                    let mut lf = ss.login_flow.lock().await;
-                                    let consumed = lf.on_screen_update(tg_bot, ss, &screen).await;
-                                    drop(lf);
+                            // Login flow (TG only)
+                            let tg_guard = ss.tg_bot.lock().await;
+                            if let Some(ref tg_bot) = *tg_guard {
+                                let mut lf = ss.login_flow.lock().await;
+                                let consumed = lf.on_screen_update(tg_bot, ss, &screen).await;
+                                drop(lf);
 
-                                    if !consumed {
-                                        let mut state = ss.bot_state.lock().await;
-                                        telegram::on_screen_update(tg_bot, &mut state, &screen).await;
+                                if !consumed {
+                                    // Bridge emits events, TG transport handles them
+                                    let mut br = ss.bridge.lock().await;
+                                    let events = br.on_screen_update(&screen);
+                                    drop(br);
+
+                                    let tg = ss.tg_state.lock().await;
+                                    if let Some(chat_id) = tg.chat_id {
+                                        for event in &events {
+                                            telegram::handle_event(tg_bot, chat_id, event).await;
+                                        }
                                     }
                                 }
+                            } else {
+                                // Headless: still run bridge for state tracking
+                                let mut br = ss.bridge.lock().await;
+                                br.on_screen_update(&screen);
                             }
+                            drop(tg_guard);
 
                             *ss.last_snapshot.lock().await = snapshot.clone();
                             rt.last_published = snapshot;
                         } else {
-                            // Spinner-only change or no change — still update last_published
-                            // to avoid accumulating diffs, and keep typing alive
+                            // Spinner-only or no change — update last_published, keep typing
                             if snapshot != rt.last_published && !snapshot.is_empty() {
                                 rt.last_published = snapshot;
                             }
-                            {
-                                let tg_guard = ss.tg_bot.lock().await;
-                                if let Some(ref tg_bot) = *tg_guard {
-                                    let state = ss.bot_state.lock().await;
-                                    if state.last_state == claude::ClaudeState::Thinking {
-                                        if let Some(chat_id) = state.chat_id {
-                                            let _ = tg_bot.send_chat_action(chat_id, teloxide::types::ChatAction::Typing).await;
-                                        }
+                            let tg_guard = ss.tg_bot.lock().await;
+                            if let Some(ref tg_bot) = *tg_guard {
+                                let br = ss.bridge.lock().await;
+                                if br.last_state == claude::ClaudeState::Thinking {
+                                    let tg = ss.tg_state.lock().await;
+                                    if let Some(chat_id) = tg.chat_id {
+                                        let _ = tg_bot.send_chat_action(chat_id, teloxide::types::ChatAction::Typing).await;
                                     }
                                 }
                             }
@@ -226,7 +237,6 @@ async fn main() -> Result<()> {
 }
 
 /// Create a new session state. If bot_token is Some, spawns a Telegram bot.
-/// If None, session runs headless (MQTT only).
 fn create_session_state(
     mqtt_client: &rumqttc::AsyncClient,
     session_id: &str,
@@ -234,26 +244,24 @@ fn create_session_state(
     debounce_ms: u64,
     chat_id: Option<i64>,
 ) -> Arc<api::SessionState> {
-    let bot_state = Arc::new(Mutex::new(BotState {
+    let tg_state = Arc::new(Mutex::new(TgState {
         mqtt_client: mqtt_client.clone(),
         session_id: session_id.to_string(),
-        last_state: claude::ClaudeState::Unknown,
-        last_process: claude::DetectedProcess::Unknown,
-        last_sent_response: String::new(),
         chat_id: chat_id.map(teloxide::types::ChatId),
     }));
 
-    let tg_bot = bot_token.as_ref().map(|t| Bot::new(t));
+    let tg_bot = bot_token.as_deref().map(|t| Bot::new(t));
 
     let ss = Arc::new(api::SessionState {
-        bot_state: bot_state.clone(),
+        tg_state: tg_state.clone(),
+        bridge: Mutex::new(Bridge::new()),
         mutable: Mutex::new(api::MutableState {
             session_id: session_id.to_string(),
             debounce_ms,
         }),
         messages_processed: AtomicU64::new(0),
         last_snapshot: Mutex::new(String::new()),
-        login_flow: Mutex::new(LoginFlow::new()),
+        login_flow: Mutex::new(login::LoginFlow::new()),
         runtime: Mutex::new(api::SessionRuntime {
             vte_parser: vte::Parser::new(),
             performer: GridPerformer::new(Grid::default()),
@@ -263,13 +271,12 @@ fn create_session_state(
         tg_bot: Mutex::new(tg_bot),
     });
 
-    // Spawn TG bot only if we have a token
     if let Some(token) = bot_token {
-        let bot_state_tg = bot_state.clone();
+        let tg_s = tg_state.clone();
         let ss_tg = ss.clone();
         let mqtt_tg = mqtt_client.clone();
         tokio::spawn(async move {
-            if let Err(e) = telegram::run_bot(&token, bot_state_tg, ss_tg, mqtt_tg).await {
+            if let Err(e) = telegram::run_bot(&token, tg_s, ss_tg, mqtt_tg).await {
                 tracing::error!("telegram bot error: {}", e);
             }
         });

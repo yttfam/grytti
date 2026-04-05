@@ -7,28 +7,29 @@ use teloxide::types::ChatAction;
 use tokio::sync::Mutex;
 
 use crate::api::SessionState;
-use crate::claude::{ClaudeScreen, ClaudeState, DetectedProcess};
+use crate::bridge::BridgeEvent;
+use crate::claude::DetectedProcess;
 
-/// Shared state between the Telegram bot and the MQTT bridge
-pub struct BotState {
+/// Telegram transport — dumb pipe. Receives events, sends messages.
+/// Knows nothing about Claude state, screen parsing, or response extraction.
+
+/// Minimal state for the TG bot handler
+pub struct TgState {
     pub mqtt_client: AsyncClient,
     pub session_id: String,
-    pub last_state: ClaudeState,
-    pub last_process: DetectedProcess,
-    pub last_sent_response: String,
     pub chat_id: Option<ChatId>,
 }
 
 pub async fn run_bot(
     token: &str,
-    state: Arc<Mutex<BotState>>,
+    state: Arc<Mutex<TgState>>,
     session_state: Arc<SessionState>,
     mqtt_client: AsyncClient,
 ) -> Result<()> {
     let bot = Bot::new(token);
 
     let handler = Update::filter_message().endpoint(
-        move |bot: Bot, msg: Message, state: Arc<Mutex<BotState>>| {
+        move |bot: Bot, msg: Message, state: Arc<Mutex<TgState>>| {
             let ss = session_state.clone();
             let mqtt = mqtt_client.clone();
             async move {
@@ -55,32 +56,23 @@ pub async fn run_bot(
                 if is_waiting_for_code {
                     tracing::info!("forwarding auth code to Claude");
                     let _ = bot.send_message(msg.chat.id, "Sending auth code...").await;
-                    let mut data = text.into_bytes();
-                    data.push(b'\r');
-                    let _ = mqtt
-                        .publish(
-                            &format!("hermytt/{}/pty/in", session_id),
-                            rumqttc::QoS::AtMostOnce,
-                            false,
-                            data,
-                        )
-                        .await;
-                } else {
-                    let _ = bot.send_chat_action(msg.chat.id, ChatAction::Typing).await;
-                    let mut data = text.into_bytes();
-                    data.push(b'\r');
-                    if let Err(e) = mqtt
-                        .publish(
-                            &format!("hermytt/{}/pty/in", session_id),
-                            rumqttc::QoS::AtMostOnce,
-                            false,
-                            data,
-                        )
-                        .await
-                    {
-                        tracing::error!("failed to send stdin: {}", e);
-                        let _ = bot.send_message(msg.chat.id, "Failed to send to Claude").await;
-                    }
+                }
+
+                // All messages go to stdin — login code or regular input
+                let _ = bot.send_chat_action(msg.chat.id, ChatAction::Typing).await;
+                let mut data = text.into_bytes();
+                data.push(b'\r');
+                if let Err(e) = mqtt
+                    .publish(
+                        &format!("hermytt/{}/pty/in", session_id),
+                        rumqttc::QoS::AtMostOnce,
+                        false,
+                        data,
+                    )
+                    .await
+                {
+                    tracing::error!("failed to send stdin: {}", e);
+                    let _ = bot.send_message(msg.chat.id, "Failed to send to Claude").await;
                 }
 
                 Ok(())
@@ -98,83 +90,35 @@ pub async fn run_bot(
     Ok(())
 }
 
-/// Called on each debounced grid snapshot to push state changes to Telegram.
-pub async fn on_screen_update(
-    bot: &Bot,
-    state: &mut BotState,
-    screen: &ClaudeScreen,
-) {
-    let chat_id = match state.chat_id {
-        Some(id) => id,
-        None => return,
-    };
-
-    if screen.state == ClaudeState::Thinking && state.last_state != ClaudeState::Thinking {
-        tracing::info!("claude is thinking");
-        let _ = bot.send_chat_action(chat_id, ChatAction::Typing).await;
-    }
-
-    if screen.state == ClaudeState::Thinking {
-        let _ = bot.send_chat_action(chat_id, ChatAction::Typing).await;
-    }
-
-    if screen.state == ClaudeState::Idle {
-        if let Some(ref response) = screen.response {
-            if *response != state.last_sent_response && !response.is_empty() {
-                tracing::info!(len = response.len(), "sending response to telegram");
-                for chunk in chunk_message(response, 4096) {
+/// Handle a bridge event — just send to Telegram. No logic.
+pub async fn handle_event(bot: &Bot, chat_id: ChatId, event: &BridgeEvent) {
+    match event {
+        BridgeEvent::Response(text) => {
+            tracing::info!(len = text.len(), "sending response to telegram");
+            for chunk in chunk_message(text, 4096) {
+                let _ = bot.send_message(chat_id, chunk).await;
+            }
+        }
+        BridgeEvent::Thinking => {
+            let _ = bot.send_chat_action(chat_id, ChatAction::Typing).await;
+        }
+        BridgeEvent::ProcessChanged(process) => {
+            let label = match process {
+                DetectedProcess::ClaudeCode => "Claude Code",
+                DetectedProcess::Shell => "Shell",
+                DetectedProcess::Unknown => return,
+            };
+            let _ = bot.send_message(chat_id, format!("[{}]", label)).await;
+        }
+        BridgeEvent::ShellOutput(text) => {
+            if !text.trim().is_empty() {
+                tracing::info!(len = text.len(), "sending shell output to telegram");
+                for chunk in chunk_message(text, 4096) {
                     let _ = bot.send_message(chat_id, chunk).await;
                 }
-                state.last_sent_response = response.clone();
             }
         }
     }
-
-    // Shell mode: forward only NEW output to Telegram
-    if screen.process == DetectedProcess::Shell && screen.state == ClaudeState::Unknown {
-        if let Some(ref response) = screen.response {
-            if *response != state.last_sent_response && !response.is_empty() {
-                // Send only the part that's new (diff from last sent)
-                let new_content = if !state.last_sent_response.is_empty()
-                    && response.starts_with(&state.last_sent_response)
-                {
-                    // Response grew — send only the new tail
-                    response[state.last_sent_response.len()..].trim_start_matches('\n')
-                } else if !state.last_sent_response.is_empty()
-                    && response.contains(&state.last_sent_response)
-                {
-                    // Old content somewhere in new response — send after it
-                    let idx = response.find(&state.last_sent_response).unwrap()
-                        + state.last_sent_response.len();
-                    response[idx..].trim_start_matches('\n')
-                } else {
-                    response.as_str()
-                };
-
-                if !new_content.trim().is_empty() {
-                    tracing::info!(len = new_content.len(), "sending shell output to telegram");
-                    for chunk in chunk_message(new_content, 4096) {
-                        let _ = bot.send_message(chat_id, chunk).await;
-                    }
-                }
-                state.last_sent_response = response.clone();
-            }
-        }
-    }
-
-    // Process change notification
-    if screen.process != state.last_process && screen.process != DetectedProcess::Unknown {
-        let label = match screen.process {
-            DetectedProcess::ClaudeCode => "Claude Code",
-            DetectedProcess::Shell => "Shell",
-            DetectedProcess::Unknown => "Unknown",
-        };
-        tracing::info!(process = label, "process changed");
-        let _ = bot.send_message(chat_id, format!("[{}]", label)).await;
-        state.last_process = screen.process.clone();
-    }
-
-    state.last_state = screen.state.clone();
 }
 
 fn chunk_message(text: &str, max_len: usize) -> Vec<&str> {

@@ -47,7 +47,7 @@ impl LoginFlow {
         screen: &crate::claude::ClaudeScreen,
     ) -> bool {
         let chat_id = {
-            let bs = app_state.bot_state.lock().await;
+            let bs = app_state.tg_state.lock().await;
             match bs.chat_id {
                 Some(id) => id,
                 None => return false,
@@ -55,7 +55,7 @@ impl LoginFlow {
         };
 
         let session_id = app_state.mutable.lock().await.session_id.clone();
-        let mqtt = app_state.bot_state.lock().await.mqtt_client.clone();
+        let mqtt = app_state.tg_state.lock().await.mqtt_client.clone();
 
         match self.state {
             LoginState::Idle => {
