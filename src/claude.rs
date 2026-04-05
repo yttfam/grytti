@@ -590,7 +590,31 @@ fn clean_response(lines: Vec<String>) -> Option<String> {
     if start >= end {
         None
     } else {
-        let result = cleaned[start..end].join("\n");
-        if result.trim().is_empty() { None } else { Some(result) }
+        // Strip common leading indent (Claude Code indents responses with 2 spaces)
+        let slice = &cleaned[start..end];
+        let min_indent = slice.iter()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| l.len() - l.trim_start().len())
+            .min()
+            .unwrap_or(0);
+
+        let dedented: Vec<&str> = slice.iter()
+            .map(|l| if l.len() >= min_indent { &l[min_indent..] } else { l.as_str() })
+            .collect();
+
+        // Collapse multiple consecutive blank lines into one
+        let mut result = String::new();
+        let mut prev_blank = false;
+        for line in &dedented {
+            let is_blank = line.trim().is_empty();
+            if is_blank && prev_blank { continue; }
+            if !result.is_empty() { result.push('\n'); }
+            result.push_str(line);
+            prev_blank = is_blank;
+        }
+
+        // Trim trailing whitespace
+        let result = result.trim_end().to_string();
+        if result.is_empty() { None } else { Some(result) }
     }
 }
