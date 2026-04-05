@@ -221,8 +221,9 @@ async fn main() -> Result<()> {
                             *ss.last_snapshot.lock().await = snapshot.clone();
                             rt.last_published = snapshot;
                         } else {
-                            // Spinner-only or no change — update last_published, keep typing
+                            // Spinner-only or no change — update tracking, keep typing
                             if snapshot != rt.last_published && !snapshot.is_empty() {
+                                *ss.last_snapshot.lock().await = snapshot.clone();
                                 rt.last_published = snapshot;
                             }
                             let tg_guard = ss.tg_bot.lock().await;

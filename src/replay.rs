@@ -132,16 +132,18 @@ pub async fn run(cast_path: &str, port: u16) -> Result<()> {
         {
             let mut rt = ss.runtime.lock().await;
             let snapshot = rt.performer.grid.snapshot();
-            if !snapshot.is_empty()
-                && snapshot != rt.last_published
-                && !claude::is_spinner_only_change(&rt.last_published, &snapshot)
-            {
-                let screen = claude::parse_screen(&snapshot);
+            if !snapshot.is_empty() && snapshot != rt.last_published {
+                let is_spinner = claude::is_spinner_only_change(&rt.last_published, &snapshot);
 
-                let mut br = ss.bridge.lock().await;
-                br.on_screen_update(&screen);
-                drop(br);
+                if !is_spinner {
+                    let screen = claude::parse_screen(&snapshot);
+                    let mut br = ss.bridge.lock().await;
+                    br.on_screen_update(&screen);
+                    drop(br);
+                }
 
+                // Always update snapshot + last_published so web UI stays current
+                // and next diff compares against latest
                 *ss.last_snapshot.lock().await = snapshot.clone();
                 rt.last_published = snapshot;
             }
