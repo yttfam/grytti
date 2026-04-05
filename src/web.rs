@@ -16,7 +16,8 @@ const CHAT_HTML: &str = include_str!("../static/chat.html");
 pub fn router(state: Arc<GlobalState>) -> Router {
     Router::new()
         .route("/chat/:session_id", get(chat_page))
-        .route("/chat", get(chat_index))
+        .route("/chat", get(chat_index.clone()))
+        .route("/chat/", get(chat_index))
         .route("/ws/:session_id", get(ws_handler))
         .with_state(state)
 }
