@@ -14,8 +14,11 @@ pub enum BridgeEvent {
 }
 
 /// Wait this long after transitioning to Idle before emitting Response.
-/// Gives streaming output time to settle.
 const IDLE_SETTLE_MS: u64 = 500;
+
+/// After emitting a response, don't emit another for this long.
+/// Prevents duplicates during streaming where response grows frame by frame.
+const RESPONSE_COOLDOWN_MS: u64 = 3000;
 
 /// Tracks screen state and emits events on meaningful transitions.
 /// Transport-agnostic — knows nothing about Telegram, WebSocket, etc.
@@ -24,6 +27,7 @@ pub struct Bridge {
     pub last_process: DetectedProcess,
     pub last_sent_response: String,
     idle_since: Option<std::time::Instant>,
+    last_response_at: Option<std::time::Instant>,
 }
 
 impl Bridge {
@@ -33,6 +37,7 @@ impl Bridge {
             last_process: DetectedProcess::Unknown,
             last_sent_response: String::new(),
             idle_since: None,
+            last_response_at: None,
         }
     }
 
@@ -46,25 +51,24 @@ impl Bridge {
         }
 
         // Idle settle + response
-        // Start settle timer on:
-        // 1. Transition to Idle (was Thinking/Unknown)
-        // 2. Response content changed while already Idle (fast answer)
+        // Only emit after transitioning to Idle AND response is stable.
+        // Cooldown prevents re-emitting during streaming.
         if screen.state == ClaudeState::Idle {
-            let response_changed = screen.response.as_ref()
-                .map_or(false, |r| !r.is_empty() && *r != self.last_sent_response);
+            let in_cooldown = self.last_response_at
+                .map_or(false, |t| t.elapsed().as_millis() < RESPONSE_COOLDOWN_MS as u128);
 
-            if self.last_state != ClaudeState::Idle || (response_changed && self.idle_since.is_none()) {
+            if self.last_state != ClaudeState::Idle && !in_cooldown {
+                // Just transitioned to Idle — start settle timer
                 self.idle_since = Some(std::time::Instant::now());
-                if response_changed {
-                    tracing::debug!("bridge: response changed while idle, starting settle timer");
-                }
             }
+
             if let Some(since) = self.idle_since {
                 if since.elapsed().as_millis() >= IDLE_SETTLE_MS as u128 {
                     if let Some(ref response) = screen.response {
                         if *response != self.last_sent_response && !response.is_empty() {
                             events.push(BridgeEvent::Response(response.clone()));
                             self.last_sent_response = response.clone();
+                            self.last_response_at = Some(std::time::Instant::now());
                         }
                     }
                     self.idle_since = None;
