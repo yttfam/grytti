@@ -11,7 +11,9 @@ echo "==> Building for $TARGET..."
 CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=x86_64-linux-musl-gcc \
 cargo build --release --target "$TARGET"
 
-BINARY="target/$TARGET/release/grytti"
+# Shared target dir (see .cargo/config.toml)
+TARGET_DIR=$(cargo metadata --format-version 1 --no-deps 2>/dev/null | python3 -c "import sys,json;print(json.load(sys.stdin)['target_directory'])" 2>/dev/null || echo "target")
+BINARY="$TARGET_DIR/$TARGET/release/grytti"
 SIZE=$(du -h "$BINARY" | cut -f1)
 echo "==> Binary: $SIZE"
 

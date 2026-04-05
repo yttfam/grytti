@@ -85,31 +85,61 @@ async fn handle_ws(socket: WebSocket, session_id: String, state: Arc<GlobalState
         }
     }
 
-    // Push task: poll snapshot changes
+    // Push task: poll bridge events, not raw snapshots
     let ss_push = ss.clone();
     let push_handle = tokio::spawn(async move {
-        let mut last = String::new();
+        let mut last_snap = String::new();
         loop {
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;
             let snap = ss_push.last_snapshot.lock().await.clone();
-            if snap != last && !snap.is_empty() {
+            if snap == last_snap || snap.is_empty() {
+                // No snapshot change — still send state for typing indicator
                 let br = ss_push.bridge.lock().await;
-                let st = state_str(&br.last_state);
-                let pr = proc_str(&br.last_process);
-                drop(br);
-
-                let screen = crate::claude::parse_screen(&snap);
-                let msg = serde_json::json!({
-                    "type": "update",
-                    "state": st,
-                    "process": pr,
-                    "response": screen.response,
-                });
-                if push_tx.send(msg.to_string()).await.is_err() {
-                    break;
+                if br.last_state == crate::claude::ClaudeState::Thinking {
+                    let msg = serde_json::json!({
+                        "type": "state",
+                        "state": "thinking",
+                    });
+                    if push_tx.send(msg.to_string()).await.is_err() { break; }
                 }
-                last = snap;
+                continue;
             }
+
+            let screen = crate::claude::parse_screen(&snap);
+
+            // Run through bridge for event filtering
+            let mut br = ss_push.bridge.lock().await;
+            let events = br.on_screen_update(&screen);
+            let st = state_str(&br.last_state);
+            let pr = proc_str(&br.last_process);
+            drop(br);
+
+            // Always send state updates
+            let state_msg = serde_json::json!({
+                "type": "state",
+                "state": st,
+                "process": pr,
+            });
+            if push_tx.send(state_msg.to_string()).await.is_err() { break; }
+
+            // Only send response/shell output from bridge events
+            for event in &events {
+                let msg = match event {
+                    crate::bridge::BridgeEvent::Response(text) => {
+                        serde_json::json!({ "type": "response", "response": text })
+                    }
+                    crate::bridge::BridgeEvent::ShellOutput(text) => {
+                        serde_json::json!({ "type": "response", "response": text })
+                    }
+                    crate::bridge::BridgeEvent::ProcessChanged(p) => {
+                        serde_json::json!({ "type": "process", "process": proc_str(p) })
+                    }
+                    crate::bridge::BridgeEvent::Thinking => continue,
+                };
+                if push_tx.send(msg.to_string()).await.is_err() { break; }
+            }
+
+            last_snap = snap;
         }
     });
 
