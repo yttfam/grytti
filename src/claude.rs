@@ -266,10 +266,21 @@ pub fn parse_screen(snapshot: &str) -> ClaudeScreen {
         state = ClaudeState::LoginPrompt;
     } else if has_not_logged_in && state == ClaudeState::Unknown {
         state = ClaudeState::NotLoggedIn;
-    } else if has_esc_to_interrupt && !(has_esc_to_interrupt_stale && has_idle_prompt) {
-        // "esc to interrupt" is reliable UNLESS it's embedded in "accept edits on"
-        // AND the ❯ prompt is also visible (stale bottom bar after response)
-        state = ClaudeState::Thinking;
+    } else if has_esc_to_interrupt {
+        // "esc to interrupt" = thinking. But on the combined bottom bar
+        // ("accept edits on · esc to interrupt"), it can be stale after response.
+        // Use spinner detection as the tiebreaker.
+        if state == ClaudeState::Thinking {
+            // Spinner was detected — definitely thinking
+        } else if !has_esc_to_interrupt_stale {
+            // Standalone "esc to interrupt" — trust it
+            state = ClaudeState::Thinking;
+        } else {
+            // Stale combined line, no spinner — fall through to idle check
+            if has_idle_prompt {
+                state = ClaudeState::Idle;
+            }
+        }
     } else if has_idle_prompt {
         state = ClaudeState::Idle;
     }
