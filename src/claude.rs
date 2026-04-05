@@ -210,8 +210,11 @@ pub fn parse_screen(snapshot: &str) -> ClaudeScreen {
         }
     };
 
-    let response = if process == DetectedProcess::Shell {
-        // Try prompt-based extraction first, fall back to everything above last prompt
+    // Don't extract response while thinking — spinner content between prompts
+    // would be falsely treated as a response
+    let response = if state == ClaudeState::Thinking {
+        None
+    } else if process == DetectedProcess::Shell {
         extract_shell_output(&lines).or_else(|| extract_shell_snapshot(&lines))
     } else {
         extract_turn_response(&lines)

@@ -55,6 +55,9 @@ impl Bridge {
 
             if self.last_state != ClaudeState::Idle || (response_changed && self.idle_since.is_none()) {
                 self.idle_since = Some(std::time::Instant::now());
+                if response_changed {
+                    tracing::debug!("bridge: response changed while idle, starting settle timer");
+                }
             }
             if let Some(since) = self.idle_since {
                 if since.elapsed().as_millis() >= IDLE_SETTLE_MS as u128 {
