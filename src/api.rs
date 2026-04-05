@@ -422,7 +422,8 @@ fn claude_state_str(state: &ClaudeState) -> &'static str {
     match state {
         ClaudeState::Idle => "idle", ClaudeState::Thinking => "thinking",
         ClaudeState::ToolUse => "tool_use", ClaudeState::NotLoggedIn => "not_logged_in",
-        ClaudeState::LoginPrompt => "login_prompt", ClaudeState::Unknown => "unknown",
+        ClaudeState::LoginPrompt => "login_prompt", ClaudeState::PermissionPrompt => "permission_prompt",
+        ClaudeState::Unknown => "unknown",
     }
 }
 

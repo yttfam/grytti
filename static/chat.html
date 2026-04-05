@@ -85,6 +85,37 @@ body {
   80%, 100% { content: '...'; }
 }
 
+.msg-permission {
+  align-self: flex-start;
+  background: #1c1917;
+  border: 1px solid #d29922;
+  border-radius: 8px;
+  padding: 12px;
+}
+.msg-permission .perm-title {
+  color: #d29922;
+  font-weight: bold;
+  margin-bottom: 8px;
+}
+.msg-permission .perm-btn {
+  display: block;
+  width: 100%;
+  margin: 4px 0;
+  padding: 6px 12px;
+  background: #21262d;
+  border: 1px solid #30363d;
+  border-radius: 4px;
+  color: #c9d1d9;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 13px;
+  text-align: left;
+}
+.msg-permission .perm-btn:hover {
+  background: #30363d;
+  border-color: #58a6ff;
+}
+
 #input-area {
   padding: 12px 16px;
   background: #161b22;
@@ -185,6 +216,12 @@ function connect() {
       addResponse(data.response);
       lastResponse = data.response;
     }
+
+    if (data.type === 'permission') {
+      addPermission(data.tool, data.command, data.options);
+      stateBadge.textContent = 'permission';
+      stateBadge.className = 'state state-thinking';
+    }
   };
 
   ws.onclose = () => {
@@ -223,6 +260,30 @@ function addSystem(text) {
   const el = document.createElement('div');
   el.className = 'msg msg-system';
   el.textContent = text;
+  messages.appendChild(el);
+  scrollDown();
+}
+
+function addPermission(tool, command, options) {
+  const el = document.createElement('div');
+  el.className = 'msg msg-permission';
+  const title = document.createElement('div');
+  title.className = 'perm-title';
+  title.textContent = `Permission: ${tool}${command ? ' — ' + command : ''}`;
+  el.appendChild(title);
+  options.forEach((opt, i) => {
+    const btn = document.createElement('button');
+    btn.className = 'perm-btn';
+    btn.textContent = `${i + 1}. ${opt}`;
+    btn.onclick = () => {
+      if (ws && ws.readyState === 1) {
+        ws.send(String(i + 1));
+        btn.style.borderColor = '#238636';
+        btn.style.color = '#238636';
+      }
+    };
+    el.appendChild(btn);
+  });
   messages.appendChild(el);
   scrollDown();
 }

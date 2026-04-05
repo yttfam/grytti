@@ -108,6 +108,14 @@ async fn handle_ws(socket: WebSocket, session_id: String, state: Arc<GlobalState
                         crate::bridge::BridgeEvent::ProcessChanged(p) => {
                             serde_json::json!({ "type": "state", "state": "idle", "process": proc_str(p) })
                         }
+                        crate::bridge::BridgeEvent::PermissionPrompt(perm) => {
+                            serde_json::json!({
+                                "type": "permission",
+                                "tool": perm.tool,
+                                "command": perm.command,
+                                "options": perm.options,
+                            })
+                        }
                     };
                     if push_tx.send(msg.to_string()).await.is_err() { break; }
                 }
@@ -173,6 +181,7 @@ fn state_str(s: &crate::claude::ClaudeState) -> &'static str {
         crate::claude::ClaudeState::NotLoggedIn => "not_logged_in",
         crate::claude::ClaudeState::LoginPrompt => "login_prompt",
         crate::claude::ClaudeState::ToolUse => "tool_use",
+        crate::claude::ClaudeState::PermissionPrompt => "permission_prompt",
         crate::claude::ClaudeState::Unknown => "unknown",
     }
 }

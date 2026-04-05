@@ -22,7 +22,7 @@ fn bridge_emits_thinking() {
         process: DetectedProcess::ClaudeCode,
         response: None,
         spinner_text: None, tool_block: None, login_url: None,
-        awaiting_code: false, login_success: false,
+        awaiting_code: false, login_success: false, permission: None,
     };
     let events = br.on_screen_update(&screen);
     assert!(events.iter().any(|e| matches!(e, BridgeEvent::Thinking)));
@@ -38,7 +38,7 @@ fn bridge_emits_response_on_thinking_to_idle() {
         process: DetectedProcess::ClaudeCode,
         response: None,
         spinner_text: None, tool_block: None, login_url: None,
-        awaiting_code: false, login_success: false,
+        awaiting_code: false, login_success: false, permission: None,
     };
     br.on_screen_update(&thinking);
 
@@ -48,7 +48,7 @@ fn bridge_emits_response_on_thinking_to_idle() {
         process: DetectedProcess::ClaudeCode,
         response: Some("Hello!".to_string()),
         spinner_text: None, tool_block: None, login_url: None,
-        awaiting_code: false, login_success: false,
+        awaiting_code: false, login_success: false, permission: None,
     };
     let events = br.on_screen_update(&idle);
     assert!(events.iter().any(|e| matches!(e, BridgeEvent::Response(t) if t == "Hello!")));
@@ -64,7 +64,7 @@ fn bridge_no_response_without_thinking() {
         process: DetectedProcess::ClaudeCode,
         response: Some("surprise!".to_string()),
         spinner_text: None, tool_block: None, login_url: None,
-        awaiting_code: false, login_success: false,
+        awaiting_code: false, login_success: false, permission: None,
     };
     let events = br.on_screen_update(&idle);
     assert!(!events.iter().any(|e| matches!(e, BridgeEvent::Response(_))));
@@ -78,7 +78,7 @@ fn bridge_emits_process_change() {
         process: DetectedProcess::Shell,
         response: None,
         spinner_text: None, tool_block: None, login_url: None,
-        awaiting_code: false, login_success: false,
+        awaiting_code: false, login_success: false, permission: None,
     };
     let events = br.on_screen_update(&screen);
     assert!(events.iter().any(|e| matches!(e, BridgeEvent::ProcessChanged(DetectedProcess::Shell))));
@@ -96,14 +96,14 @@ fn bridge_no_duplicate_response() {
     br.on_screen_update(&claude::ClaudeScreen {
         state: ClaudeState::Thinking, process: DetectedProcess::ClaudeCode,
         response: None, spinner_text: None, tool_block: None,
-        login_url: None, awaiting_code: false, login_success: false,
+        login_url: None, awaiting_code: false, login_success: false, permission: None,
     });
 
     let idle = claude::ClaudeScreen {
         state: ClaudeState::Idle, process: DetectedProcess::ClaudeCode,
         response: Some("answer".to_string()),
         spinner_text: None, tool_block: None, login_url: None,
-        awaiting_code: false, login_success: false,
+        awaiting_code: false, login_success: false, permission: None,
     };
     let events = br.on_screen_update(&idle);
     assert!(events.iter().any(|e| matches!(e, BridgeEvent::Response(_))));
@@ -120,7 +120,7 @@ fn bridge_rejects_spinner_response() {
     br.on_screen_update(&claude::ClaudeScreen {
         state: ClaudeState::Thinking, process: DetectedProcess::ClaudeCode,
         response: None, spinner_text: None, tool_block: None,
-        login_url: None, awaiting_code: false, login_success: false,
+        login_url: None, awaiting_code: false, login_success: false, permission: None,
     });
 
     // Idle but response looks like spinner
@@ -128,7 +128,7 @@ fn bridge_rejects_spinner_response() {
         state: ClaudeState::Idle, process: DetectedProcess::ClaudeCode,
         response: Some("· Incubating…".to_string()),
         spinner_text: None, tool_block: None, login_url: None,
-        awaiting_code: false, login_success: false,
+        awaiting_code: false, login_success: false, permission: None,
     };
     let events = br.on_screen_update(&idle);
     assert!(!events.iter().any(|e| matches!(e, BridgeEvent::Response(_))),

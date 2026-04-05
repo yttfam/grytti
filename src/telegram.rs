@@ -58,7 +58,36 @@ pub async fn run_bot(
                     let _ = bot.send_message(msg.chat.id, "Sending auth code...").await;
                 }
 
-                // All messages go to stdin — login code or regular input
+                // Check if we're in a permission prompt — single digit = option selection
+                let in_permission = {
+                    let br = ss.bridge.lock().await;
+                    br.last_state == crate::claude::ClaudeState::PermissionPrompt
+                };
+
+                if in_permission {
+                    let trimmed = text.trim();
+                    // Accept digit or y/n aliases
+                    let digit = match trimmed {
+                        "y" | "Y" => Some("1"),
+                        "n" | "N" => Some("3"), // No is typically option 3
+                        d if d.len() == 1 && d.chars().next().unwrap().is_ascii_digit() => Some(d),
+                        _ => None,
+                    };
+                    if let Some(d) = digit {
+                        tracing::info!(option = d, "forwarding permission choice");
+                        let _ = mqtt
+                            .publish(
+                                &format!("hermytt/{}/pty/in", session_id),
+                                rumqttc::QoS::AtMostOnce,
+                                false,
+                                d.as_bytes().to_vec(),
+                            )
+                            .await;
+                        return respond(());
+                    }
+                }
+
+                // Regular message → stdin with carriage return
                 let _ = bot.send_chat_action(msg.chat.id, ChatAction::Typing).await;
                 let mut data = text.into_bytes();
                 data.push(b'\r');
@@ -117,6 +146,15 @@ pub async fn handle_event(bot: &Bot, chat_id: ChatId, event: &BridgeEvent) {
                     let _ = bot.send_message(chat_id, chunk).await;
                 }
             }
+        }
+        BridgeEvent::PermissionPrompt(perm) => {
+            let mut msg = format!("Permission: {} {}\n\n", perm.tool, perm.command);
+            for (i, opt) in perm.options.iter().enumerate() {
+                msg.push_str(&format!("{}. {}\n", i + 1, opt));
+            }
+            msg.push_str("\nReply with the option number.");
+            tracing::info!(tool = %perm.tool, options = perm.options.len(), "sending permission prompt to telegram");
+            let _ = bot.send_message(chat_id, msg).await;
         }
     }
 }

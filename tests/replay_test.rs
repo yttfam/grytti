@@ -275,6 +275,39 @@ fn bridge_no_separator_in_responses() {
     }
 }
 
+// === Permission prompt tests ===
+
+#[test]
+fn replay_detects_permission_prompt() {
+    let results = replay_frames(CAST_FILE);
+    let perm_frames: Vec<_> = results.iter()
+        .filter(|(_, _, s)| s.state == ClaudeState::PermissionPrompt)
+        .collect();
+    // The recording contains a permission prompt at ~127s
+    assert!(!perm_frames.is_empty(), "never detected PermissionPrompt in {} frames", results.len());
+}
+
+#[test]
+fn replay_permission_has_options() {
+    let results = replay_frames(CAST_FILE);
+    for (_, _, screen) in &results {
+        if screen.state == ClaudeState::PermissionPrompt {
+            let perm = screen.permission.as_ref().expect("PermissionPrompt state without permission info");
+            assert!(!perm.options.is_empty(), "permission prompt has no options");
+            assert!(!perm.tool.is_empty(), "permission prompt has no tool name");
+        }
+    }
+}
+
+#[test]
+fn bridge_emits_permission_event() {
+    let (events, _) = replay_bridge(CAST_FILE);
+    let perm_count = events.iter()
+        .filter(|e| matches!(e, BridgeEvent::PermissionPrompt(_)))
+        .count();
+    assert!(perm_count > 0, "bridge never emitted PermissionPrompt");
+}
+
 // === State transition sanity ===
 
 #[test]

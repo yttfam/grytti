@@ -29,6 +29,8 @@ pub enum ClaudeState {
     NotLoggedIn,
     /// Login flow in progress
     LoginPrompt,
+    /// Permission prompt — waiting for user to approve/deny
+    PermissionPrompt,
     /// Unknown / startup / not yet determined
     Unknown,
 }
@@ -39,6 +41,14 @@ pub enum DetectedProcess {
     ClaudeCode,
     Shell,
     Unknown,
+}
+
+/// Permission prompt info extracted from the screen
+#[derive(Debug, Clone)]
+pub struct PermissionInfo {
+    pub tool: String,
+    pub command: String,
+    pub options: Vec<String>,
 }
 
 /// Parsed snapshot of Claude CLI's current screen
@@ -58,6 +68,8 @@ pub struct ClaudeScreen {
     pub awaiting_code: bool,
     /// Whether "Login successful" is visible
     pub login_success: bool,
+    /// Permission prompt, if one is visible
+    pub permission: Option<PermissionInfo>,
 }
 
 // Spinner symbols Claude Code uses (rotating set)
@@ -135,6 +147,8 @@ pub fn parse_screen(snapshot: &str) -> ClaudeScreen {
     let mut has_not_logged_in = false;
     let mut has_login_menu = false;
     let mut has_login_success = false;
+    let mut has_permission_prompt = false;
+    let mut permission_options: Vec<String> = Vec::new();
 
     // Collect URL fragments across wrapped lines
     let mut url_fragments: Vec<String> = Vec::new();
@@ -185,6 +199,26 @@ pub fn parse_screen(snapshot: &str) -> ClaudeScreen {
             awaiting_code = true;
         }
 
+        // Permission prompt detection
+        if trimmed.contains("Do you want to proceed")
+            || trimmed.contains("Do you want to create")
+            || trimmed.contains("Do you want to overwrite")
+            || trimmed.contains("Do you want to make this edit")
+        {
+            has_permission_prompt = true;
+        }
+
+        // Extract numbered permission options (e.g. "1. Yes", "2. No")
+        // Options can start with ❯ (selected) or spaces
+        if has_permission_prompt {
+            let opt_line = trimmed.trim_start_matches('❯').trim();
+            if let Some(rest) = opt_line.strip_prefix(|c: char| c.is_ascii_digit()) {
+                if let Some(label) = rest.strip_prefix(". ") {
+                    permission_options.push(label.to_string());
+                }
+            }
+        }
+
         // OAuth URL extraction — URL wraps across multiple lines in the grid
         if trimmed.starts_with("https://claude.com/cai/oauth") {
             in_url = true;
@@ -222,8 +256,9 @@ pub fn parse_screen(snapshot: &str) -> ClaudeScreen {
     }
 
     // Resolve state from bottom-bar indicators (most reliable)
-    // These override any spinner detection since they're authoritative
-    if has_login_menu || awaiting_code {
+    if has_permission_prompt && !permission_options.is_empty() {
+        state = ClaudeState::PermissionPrompt;
+    } else if has_login_menu || awaiting_code {
         state = ClaudeState::LoginPrompt;
     } else if has_not_logged_in && state == ClaudeState::Unknown {
         state = ClaudeState::NotLoggedIn;
@@ -235,8 +270,37 @@ pub fn parse_screen(snapshot: &str) -> ClaudeScreen {
         state = ClaudeState::Idle;
     }
 
+    // Build permission info if detected
+    let permission = if has_permission_prompt && !permission_options.is_empty() {
+        // Try to extract tool name from screen — look for "Bash ·" or tool keywords
+        let tool = lines.iter()
+            .find_map(|l| {
+                let t = l.trim();
+                // Permission dialog title: "Bash · command" or just "Bash"
+                for name in &["Bash", "Write", "Edit", "Read", "Notebook"] {
+                    if t.starts_with(name) && (t.len() == name.len() || t.as_bytes().get(name.len()) == Some(&b' ')) {
+                        return Some(name.to_string());
+                    }
+                }
+                // Also check for "Create file" / "Overwrite file" / "Edit file"
+                if t.starts_with("Create file") { return Some("Write".to_string()); }
+                if t.starts_with("Overwrite file") { return Some("Write".to_string()); }
+                if t.starts_with("Edit file") { return Some("Edit".to_string()); }
+                None
+            })
+            .unwrap_or_else(|| "Tool".to_string());
+
+        Some(PermissionInfo {
+            tool,
+            command: String::new(), // TODO: extract command from dialog
+            options: permission_options,
+        })
+    } else {
+        None
+    };
+
     // Detect process
-    let process = if has_idle_prompt || has_esc_to_interrupt || has_login_menu || awaiting_code {
+    let process = if has_idle_prompt || has_esc_to_interrupt || has_login_menu || awaiting_code || has_permission_prompt {
         DetectedProcess::ClaudeCode
     } else {
         // Check for shell prompt patterns
@@ -274,6 +338,7 @@ pub fn parse_screen(snapshot: &str) -> ClaudeScreen {
         login_url,
         awaiting_code,
         login_success: has_login_success,
+        permission,
     }
 }
 
