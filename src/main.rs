@@ -65,7 +65,9 @@ async fn main() -> Result<()> {
 
     let mut bot_tokens: HashMap<String, String> = HashMap::new();
     for sc in &session_configs {
-        let bot_token = sc.telegram.as_ref().map(|t| t.bot_token.clone());
+        let bot_token = sc.telegram.as_ref()
+            .map(|t| t.bot_token.clone())
+            .filter(|t| !t.is_empty());
         let ss = create_session_state(&client, &sc.session_id, bot_token.clone(), sc.debounce_ms, sc.chat_id);
         if let Some(ref token) = bot_token {
             bot_tokens.insert(sc.session_id.clone(), token.clone());

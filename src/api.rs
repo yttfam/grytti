@@ -164,7 +164,9 @@ async fn create_session(
         chat_id: None,
     }));
 
-    let tg_bot = req.bot_token.as_ref().map(|t| teloxide::Bot::new(t));
+    let tg_bot = req.bot_token.as_ref()
+        .filter(|t| !t.is_empty())
+        .map(|t| teloxide::Bot::new(t));
 
     let ss = Arc::new(SessionState {
         bot_state: bot_state.clone(),
@@ -184,9 +186,9 @@ async fn create_session(
         tg_bot,
     });
 
-    // Spawn TG bot only if token provided
-    if let Some(ref token) = req.bot_token {
-        let tg_token = token.clone();
+    // Spawn TG bot only if valid token provided
+    if let Some(ref token) = req.bot_token.as_ref().filter(|t| !t.is_empty()) {
+        let tg_token = token.to_string();
         let bot_state_tg = bot_state.clone();
         let ss_tg = ss.clone();
         let mqtt_client_tg = state.mqtt_client.clone();
