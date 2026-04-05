@@ -61,6 +61,7 @@ pub async fn run(cast_path: &str, port: u16) -> Result<()> {
     let ss = Arc::new(api::SessionState {
         tg_state,
         bridge: Mutex::new(Bridge::new()),
+        web_events: tokio::sync::broadcast::channel(64).0,
         mutable: Mutex::new(api::MutableState {
             session_id: session_id.to_string(),
             debounce_ms: 200,
@@ -138,8 +139,11 @@ pub async fn run(cast_path: &str, port: u16) -> Result<()> {
                 if !is_spinner {
                     let screen = claude::parse_screen(&snapshot);
                     let mut br = ss.bridge.lock().await;
-                    br.on_screen_update(&screen);
+                    let events = br.on_screen_update(&screen);
                     drop(br);
+                    for event in &events {
+                        let _ = ss.web_events.send(event.clone());
+                    }
                 }
 
                 // Always update snapshot + last_published so web UI stays current

@@ -81,39 +81,47 @@ async fn handle_ws(socket: WebSocket, session_id: String, state: Arc<GlobalState
         let _ = sender.send(Message::Text(msg.to_string().into())).await;
     }
 
-    // Push task: read bridge state (driven by main loop), push to browser
+    // Push task: receive bridge events via broadcast channel
     let ss_push = ss.clone();
+    let mut event_rx = ss.web_events.subscribe();
     let push_handle = tokio::spawn(async move {
-        let mut last_response = String::new();
-        let mut last_state = String::new();
         loop {
-            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-
-            let br = ss_push.bridge.lock().await;
-            let st = state_str(&br.last_state).to_string();
-            let pr = proc_str(&br.last_process).to_string();
-            let response = br.last_sent_response.clone();
-            drop(br);
-
-            // Send state changes
-            if st != last_state {
-                let msg = serde_json::json!({
-                    "type": "state",
-                    "state": st,
-                    "process": pr,
-                });
-                if push_tx.send(msg.to_string()).await.is_err() { break; }
-                last_state = st;
-            }
-
-            // Send new responses (bridge already deduped and settled)
-            if response != last_response && !response.is_empty() {
-                let msg = serde_json::json!({
-                    "type": "response",
-                    "response": response,
-                });
-                if push_tx.send(msg.to_string()).await.is_err() { break; }
-                last_response = response;
+            tokio::select! {
+                // Bridge events (Response, Thinking, ProcessChanged, ShellOutput)
+                event = event_rx.recv() => {
+                    let event = match event {
+                        Ok(e) => e,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(_) => break,
+                    };
+                    let msg = match &event {
+                        crate::bridge::BridgeEvent::Response(text) => {
+                            tracing::info!(len = text.len(), "web: response");
+                            serde_json::json!({ "type": "response", "response": text })
+                        }
+                        crate::bridge::BridgeEvent::ShellOutput(text) => {
+                            serde_json::json!({ "type": "response", "response": text })
+                        }
+                        crate::bridge::BridgeEvent::Thinking => {
+                            serde_json::json!({ "type": "state", "state": "thinking" })
+                        }
+                        crate::bridge::BridgeEvent::ProcessChanged(p) => {
+                            serde_json::json!({ "type": "state", "state": "idle", "process": proc_str(p) })
+                        }
+                    };
+                    if push_tx.send(msg.to_string()).await.is_err() { break; }
+                }
+                // Periodic state poll for idle/thinking badge updates
+                _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {
+                    let br = ss_push.bridge.lock().await;
+                    let msg = serde_json::json!({
+                        "type": "state",
+                        "state": state_str(&br.last_state),
+                        "process": proc_str(&br.last_process),
+                    });
+                    drop(br);
+                    if push_tx.send(msg.to_string()).await.is_err() { break; }
+                }
             }
         }
     });

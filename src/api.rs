@@ -28,6 +28,8 @@ pub struct SessionState {
     pub tg_state: Arc<Mutex<crate::telegram::TgState>>,
     /// Bridge: state machine that emits events (transport-agnostic)
     pub bridge: Mutex<crate::bridge::Bridge>,
+    /// Channel for web UI to receive bridge events
+    pub web_events: tokio::sync::broadcast::Sender<crate::bridge::BridgeEvent>,
     pub mutable: Mutex<MutableState>,
     pub messages_processed: AtomicU64,
     pub last_snapshot: Mutex<String>,
@@ -170,6 +172,7 @@ async fn create_session(
     let ss = Arc::new(SessionState {
         tg_state: tg_state.clone(),
         bridge: Mutex::new(crate::bridge::Bridge::new()),
+        web_events: tokio::sync::broadcast::channel(64).0,
         mutable: Mutex::new(MutableState {
             session_id: req.session_id.clone(),
             debounce_ms: req.debounce_ms,

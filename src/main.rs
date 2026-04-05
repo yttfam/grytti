@@ -199,11 +199,16 @@ async fn main() -> Result<()> {
                                 drop(lf);
 
                                 if !consumed {
-                                    // Bridge emits events, TG transport handles them
                                     let mut br = ss.bridge.lock().await;
                                     let events = br.on_screen_update(&screen);
                                     drop(br);
 
+                                    // Broadcast to web UI
+                                    for event in &events {
+                                        let _ = ss.web_events.send(event.clone());
+                                    }
+
+                                    // TG transport
                                     let tg = ss.tg_state.lock().await;
                                     if let Some(chat_id) = tg.chat_id {
                                         for event in &events {
@@ -212,9 +217,12 @@ async fn main() -> Result<()> {
                                     }
                                 }
                             } else {
-                                // Headless: still run bridge for state tracking
+                                // Headless: run bridge + broadcast to web
                                 let mut br = ss.bridge.lock().await;
-                                br.on_screen_update(&screen);
+                                let events = br.on_screen_update(&screen);
+                                for event in &events {
+                                    let _ = ss.web_events.send(event.clone());
+                                }
                             }
                             drop(tg_guard);
 
@@ -265,6 +273,7 @@ fn create_session_state(
     let ss = Arc::new(api::SessionState {
         tg_state: tg_state.clone(),
         bridge: Mutex::new(Bridge::new()),
+        web_events: tokio::sync::broadcast::channel(64).0,
         mutable: Mutex::new(api::MutableState {
             session_id: session_id.to_string(),
             debounce_ms,
