@@ -259,9 +259,9 @@ fn extract_turn_response(lines: &[&str]) -> Option<String> {
     let mut response_lines = Vec::new();
     for i in (last_input_idx + 1)..current_prompt_idx {
         let trimmed = lines[i].trim();
-        // Skip separator lines (pure ─── or ─── with embedded text like session names)
-        let char_count = trimmed.chars().count();
-        if char_count > 20 && trimmed.chars().filter(|&c| c == '─').count() > char_count / 2 {
+        // Skip TUI separator lines — pure dashes or dashes with a short label (session name)
+        // Don't strip content like heredoc markers that happen to contain dashes
+        if is_separator_line(trimmed) {
             continue;
         }
         // Strip ⏺ markers — they're visual, not content
@@ -314,10 +314,17 @@ fn extract_last_response_block(lines: &[&str]) -> Option<String> {
         if trimmed.starts_with("❯") {
             break;
         }
-        if trimmed.len() > 20 && trimmed.chars().all(|c| c == '─') {
+        if is_separator_line(trimmed) {
             break;
         }
-        response_lines.push(line.trim_end().to_string());
+        // Strip ⏺ markers
+        if trimmed == "⏺" { continue; }
+        let cleaned = if trimmed.starts_with("⏺ ") {
+            line.trim_end().replacen("⏺ ", "", 1)
+        } else {
+            line.trim_end().to_string()
+        };
+        response_lines.push(cleaned);
     }
 
     while response_lines.last().map_or(false, |l| l.trim().is_empty()) {
@@ -412,4 +419,30 @@ fn extract_shell_snapshot(lines: &[&str]) -> Option<String> {
     } else {
         Some(output_lines.join("\n"))
     }
+}
+
+/// Check if a line is a TUI separator (not content).
+/// TUI separators: pure ─── or ─── with a short label like " infrakid "
+/// Content like "──EOF──────" from heredocs should NOT match.
+fn is_separator_line(line: &str) -> bool {
+    let char_count = line.chars().count();
+    if char_count < 20 {
+        return false;
+    }
+    // Must start and end with ─
+    if !line.starts_with('─') || !line.ends_with('─') {
+        return false;
+    }
+    // Extract non-dash content
+    let non_dash: String = line.chars().filter(|&c| c != '─' && c != ' ').collect();
+    // Pure dashes (+ spaces) = separator
+    if non_dash.is_empty() {
+        return true;
+    }
+    // TUI labels are space-padded: "── infrakid ──" → " infrakid " after stripping dashes
+    // Content like "──EOF──" has no leading/trailing space after stripping dashes
+    let inner = line.trim_start_matches('─').trim_end_matches('─');
+    // Empty inner = pure dashes (already handled above)
+    // Space-padded label = TUI separator
+    inner.starts_with(' ') && inner.ends_with(' ') && inner.trim().len() <= 20
 }
