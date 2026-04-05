@@ -69,20 +69,16 @@ async fn handle_ws(socket: WebSocket, session_id: String, state: Arc<GlobalState
     // Channel for push messages to browser
     let (push_tx, mut push_rx) = mpsc::channel::<String>(64);
 
-    // Send initial snapshot
+    // Send initial state + last settled response (not raw screen parse)
     {
-        let snap = ss.last_snapshot.lock().await.clone();
-        if !snap.is_empty() {
-            let screen = crate::claude::parse_screen(&snap);
-            let br = ss.bridge.lock().await;
-            let msg = serde_json::json!({
-                "type": "snapshot",
-                "state": state_str(&br.last_state),
-                "process": proc_str(&br.last_process),
-                "response": screen.response,
-            });
-            let _ = sender.send(Message::Text(msg.to_string().into())).await;
-        }
+        let br = ss.bridge.lock().await;
+        let msg = serde_json::json!({
+            "type": "snapshot",
+            "state": state_str(&br.last_state),
+            "process": proc_str(&br.last_process),
+            "response": if br.last_sent_response.is_empty() { None } else { Some(&br.last_sent_response) },
+        });
+        let _ = sender.send(Message::Text(msg.to_string().into())).await;
     }
 
     // Push task: read bridge state (driven by main loop), push to browser

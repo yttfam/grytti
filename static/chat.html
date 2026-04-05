@@ -124,6 +124,7 @@ body {
   <span id="state-badge" class="state state-unknown">connecting</span>
   <span id="process" class="process"></span>
   <span style="flex:1"></span>
+  <button id="copy-btn" style="background:#30363d;border:1px solid #484f58;border-radius:4px;color:#c9d1d9;padding:2px 8px;cursor:pointer;font-size:11px;font-family:inherit">Copy</button>
   <span id="session-id" class="process"></span>
 </div>
 
@@ -243,6 +244,21 @@ input.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') send();
 });
 sendBtn.addEventListener('click', send);
+
+document.getElementById('copy-btn').addEventListener('click', () => {
+  const msgs = document.querySelectorAll('.msg');
+  const text = Array.from(msgs).map(el => {
+    if (el.classList.contains('msg-user')) return '> ' + el.textContent;
+    if (el.classList.contains('msg-response')) return el.textContent;
+    if (el.classList.contains('msg-system')) return '--- ' + el.textContent + ' ---';
+    return el.textContent;
+  }).join('\n\n');
+  navigator.clipboard.writeText(text).then(() => {
+    const btn = document.getElementById('copy-btn');
+    btn.textContent = 'Copied!';
+    setTimeout(() => btn.textContent = 'Copy', 1500);
+  });
+});
 
 connect();
 </script>
