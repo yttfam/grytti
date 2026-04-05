@@ -46,8 +46,14 @@ impl Bridge {
         }
 
         // Idle settle + response
+        // Start settle timer on:
+        // 1. Transition to Idle (was Thinking/Unknown)
+        // 2. Response content changed while already Idle (fast answer)
         if screen.state == ClaudeState::Idle {
-            if self.last_state != ClaudeState::Idle {
+            let response_changed = screen.response.as_ref()
+                .map_or(false, |r| !r.is_empty() && *r != self.last_sent_response);
+
+            if self.last_state != ClaudeState::Idle || (response_changed && self.idle_since.is_none()) {
                 self.idle_since = Some(std::time::Instant::now());
             }
             if let Some(since) = self.idle_since {
