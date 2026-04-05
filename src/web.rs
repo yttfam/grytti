@@ -85,61 +85,40 @@ async fn handle_ws(socket: WebSocket, session_id: String, state: Arc<GlobalState
         }
     }
 
-    // Push task: poll bridge events, not raw snapshots
+    // Push task: read bridge state (driven by main loop), push to browser
     let ss_push = ss.clone();
     let push_handle = tokio::spawn(async move {
-        let mut last_snap = String::new();
+        let mut last_response = String::new();
+        let mut last_state = String::new();
         loop {
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-            let snap = ss_push.last_snapshot.lock().await.clone();
-            if snap == last_snap || snap.is_empty() {
-                // No snapshot change — still send state for typing indicator
-                let br = ss_push.bridge.lock().await;
-                if br.last_state == crate::claude::ClaudeState::Thinking {
-                    let msg = serde_json::json!({
-                        "type": "state",
-                        "state": "thinking",
-                    });
-                    if push_tx.send(msg.to_string()).await.is_err() { break; }
-                }
-                continue;
-            }
 
-            let screen = crate::claude::parse_screen(&snap);
-
-            // Run through bridge for event filtering
-            let mut br = ss_push.bridge.lock().await;
-            let events = br.on_screen_update(&screen);
-            let st = state_str(&br.last_state);
-            let pr = proc_str(&br.last_process);
+            let br = ss_push.bridge.lock().await;
+            let st = state_str(&br.last_state).to_string();
+            let pr = proc_str(&br.last_process).to_string();
+            let response = br.last_sent_response.clone();
             drop(br);
 
-            // Always send state updates
-            let state_msg = serde_json::json!({
-                "type": "state",
-                "state": st,
-                "process": pr,
-            });
-            if push_tx.send(state_msg.to_string()).await.is_err() { break; }
-
-            // Only send response/shell output from bridge events
-            for event in &events {
-                let msg = match event {
-                    crate::bridge::BridgeEvent::Response(text) => {
-                        serde_json::json!({ "type": "response", "response": text })
-                    }
-                    crate::bridge::BridgeEvent::ShellOutput(text) => {
-                        serde_json::json!({ "type": "response", "response": text })
-                    }
-                    crate::bridge::BridgeEvent::ProcessChanged(p) => {
-                        serde_json::json!({ "type": "process", "process": proc_str(p) })
-                    }
-                    crate::bridge::BridgeEvent::Thinking => continue,
-                };
+            // Send state changes
+            if st != last_state {
+                let msg = serde_json::json!({
+                    "type": "state",
+                    "state": st,
+                    "process": pr,
+                });
                 if push_tx.send(msg.to_string()).await.is_err() { break; }
+                last_state = st;
             }
 
-            last_snap = snap;
+            // Send new responses (bridge already deduped and settled)
+            if response != last_response && !response.is_empty() {
+                let msg = serde_json::json!({
+                    "type": "response",
+                    "response": response,
+                });
+                if push_tx.send(msg.to_string()).await.is_err() { break; }
+                last_response = response;
+            }
         }
     });
 
@@ -163,6 +142,7 @@ async fn handle_ws(socket: WebSocket, session_id: String, state: Arc<GlobalState
                 match msg {
                     Some(Ok(Message::Text(text))) => {
                         let sid = ss_recv.mutable.lock().await.session_id.clone();
+                        tracing::info!(session = %sid, text = %text, "web UI message received");
                         let mut data = text.as_bytes().to_vec();
                         data.push(b'\r');
                         let _ = mqtt.publish(
