@@ -6,6 +6,7 @@ mod grid;
 mod login;
 mod mqtt;
 mod parser;
+mod replay;
 mod telegram;
 mod web;
 
@@ -33,6 +34,14 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .init();
+
+    // Check for replay mode: grytti replay <cast_file> [port]
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(|s| s.as_str()) == Some("replay") {
+        let cast_path = args.get(2).ok_or_else(|| anyhow::anyhow!("usage: grytti replay <cast_file> [port]"))?;
+        let port: u16 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(7781);
+        return replay::run(cast_path, port).await;
+    }
 
     let config_path = std::env::args()
         .nth(1)
