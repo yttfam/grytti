@@ -115,7 +115,7 @@ fn extract_simple_response() {
   ? for shortcuts
 "#;
     let parsed = parse_screen(screen);
-    assert_eq!(parsed.response.as_deref(), Some("⏺ 4"));
+    assert_eq!(parsed.response.as_deref(), Some("4"));
 }
 
 // Bug fix: response extractor was only getting last ⏺ block,

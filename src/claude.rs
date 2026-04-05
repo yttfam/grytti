@@ -259,11 +259,21 @@ fn extract_turn_response(lines: &[&str]) -> Option<String> {
     let mut response_lines = Vec::new();
     for i in (last_input_idx + 1)..current_prompt_idx {
         let trimmed = lines[i].trim();
-        // Skip heavy separators
-        if trimmed.len() > 20 && trimmed.chars().all(|c| c == '─') {
+        // Skip separator lines (pure ─── or ─── with embedded text like session names)
+        let char_count = trimmed.chars().count();
+        if char_count > 20 && trimmed.chars().filter(|&c| c == '─').count() > char_count / 2 {
             continue;
         }
-        response_lines.push(lines[i].trim_end().to_string());
+        // Strip ⏺ markers — they're visual, not content
+        if trimmed == "⏺" {
+            continue;
+        }
+        let line = if trimmed.starts_with("⏺ ") {
+            lines[i].trim_end().replacen("⏺ ", "", 1)
+        } else {
+            lines[i].trim_end().to_string()
+        };
+        response_lines.push(line);
     }
 
     // Trim leading/trailing empty lines
