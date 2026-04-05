@@ -64,11 +64,15 @@ pub struct ClaudeScreen {
 const SPINNER_CHARS: &[char] = &['✶', '✸', '✹', '✺', '✹', '✷', '✵', '✳', '✢', '·', '✻', '✽'];
 
 // Spinner labels Claude Code uses
-const SPINNER_WORDS: &[&str] = &[
+pub const SPINNER_WORDS: &[&str] = &[
     "Simmering", "Channelling", "Nucleating", "Percolating", "Distilling",
     "Crystallizing", "Manifesting", "Conjuring", "Synthesizing", "Composing",
     "Formulating", "Imagining", "Pondering", "Reflecting", "Contemplating",
     "Meditating", "Ruminating", "Deliberating", "Incubating", "Gestating",
+    "Crafting", "Cultivating", "Discombobulating", "Finagling", "Forming",
+    "Meandering", "Mulling", "Noodling", "Recombobulating", "Whirlpooling",
+    "Puttering", "Gitifying", "Ideating", "Canoodling", "Moonwalking",
+    "Cooked", "Cogitated", "Perambulating",
 ];
 
 // Tool use markers in Claude Code output
@@ -106,7 +110,8 @@ pub fn parse_screen(snapshot: &str) -> ClaudeScreen {
         }
 
         // "esc to interrupt" = Claude is actively working
-        if trimmed == "esc to interrupt" {
+        // Can appear standalone or embedded: "⏵⏵ accept edits on ... · esc to interrupt"
+        if trimmed.contains("esc to interrupt") {
             has_esc_to_interrupt = true;
             continue;
         }
@@ -259,15 +264,10 @@ fn extract_turn_response(lines: &[&str]) -> Option<String> {
     let mut response_lines = Vec::new();
     for i in (last_input_idx + 1)..current_prompt_idx {
         let trimmed = lines[i].trim();
-        // Skip TUI separator lines — pure dashes or dashes with a short label (session name)
-        // Don't strip content like heredoc markers that happen to contain dashes
-        if is_separator_line(trimmed) {
-            continue;
-        }
-        // Strip ⏺ markers — they're visual, not content
-        if trimmed == "⏺" {
-            continue;
-        }
+        if is_separator_line(trimmed) { continue; }
+        if trimmed == "⏺" { continue; }
+        if is_spinner_line(trimmed) { continue; }
+        if is_timing_line(trimmed) { continue; }
         let line = if trimmed.starts_with("⏺ ") {
             lines[i].trim_end().replacen("⏺ ", "", 1)
         } else {
@@ -284,11 +284,7 @@ fn extract_turn_response(lines: &[&str]) -> Option<String> {
         response_lines.pop();
     }
 
-    if response_lines.is_empty() {
-        None
-    } else {
-        Some(response_lines.join("\n"))
-    }
+    clean_response(response_lines)
 }
 
 /// Fallback: extract text after the last `⏺` marker.
@@ -314,11 +310,10 @@ fn extract_last_response_block(lines: &[&str]) -> Option<String> {
         if trimmed.starts_with("❯") {
             break;
         }
-        if is_separator_line(trimmed) {
-            break;
-        }
-        // Strip ⏺ markers
+        if is_separator_line(trimmed) { break; }
         if trimmed == "⏺" { continue; }
+        if is_spinner_line(trimmed) { continue; }
+        if is_timing_line(trimmed) { continue; }
         let cleaned = if trimmed.starts_with("⏺ ") {
             line.trim_end().replacen("⏺ ", "", 1)
         } else {
@@ -331,11 +326,7 @@ fn extract_last_response_block(lines: &[&str]) -> Option<String> {
         response_lines.pop();
     }
 
-    if response_lines.is_empty() {
-        None
-    } else {
-        Some(response_lines.join("\n"))
-    }
+    clean_response(response_lines)
 }
 
 /// Extract shell output — everything between the second-to-last prompt and the last prompt.
@@ -421,6 +412,22 @@ fn extract_shell_snapshot(lines: &[&str]) -> Option<String> {
     }
 }
 
+/// Check if a line is spinner content (rotating symbol + thinking word).
+pub fn is_spinner_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty() { return false; }
+    let first_char = trimmed.chars().next().unwrap_or(' ');
+    if !SPINNER_CHARS.contains(&first_char) { return false; }
+    SPINNER_WORDS.iter().any(|w| trimmed.contains(w))
+}
+
+/// "Cooked for Xs" / "Cogitated for Xs" summary lines — not spinner, but timing info
+fn is_timing_line(line: &str) -> bool {
+    let t = line.trim();
+    SPINNER_CHARS.contains(&t.chars().next().unwrap_or(' '))
+        && (t.contains("for ") && (t.contains("s") || t.contains("m ")))
+}
+
 /// Check if a line is a TUI separator (not content).
 /// TUI separators: pure ─── or ─── with a short label like " infrakid "
 /// Content like "──EOF──────" from heredocs should NOT match.
@@ -445,4 +452,33 @@ fn is_separator_line(line: &str) -> bool {
     // Empty inner = pure dashes (already handled above)
     // Space-padded label = TUI separator
     inner.starts_with(' ') && inner.ends_with(' ') && inner.trim().len() <= 20
+}
+
+/// Final cleanup: remove any line that contains spinner words or is junk from partial redraws.
+fn clean_response(lines: Vec<String>) -> Option<String> {
+    let cleaned: Vec<String> = lines.into_iter()
+        .filter(|line| {
+            let t = line.trim();
+            // Remove lines containing spinner words
+            if SPINNER_WORDS.iter().any(|w| t.contains(w)) {
+                return false;
+            }
+            // Remove lines that are just a spinner char
+            if t.chars().count() <= 2 && t.chars().next().map_or(false, |c| SPINNER_CHARS.contains(&c)) {
+                return false;
+            }
+            true
+        })
+        .collect();
+
+    // Trim leading/trailing empty lines after filtering
+    let start = cleaned.iter().position(|l| !l.trim().is_empty()).unwrap_or(0);
+    let end = cleaned.iter().rposition(|l| !l.trim().is_empty()).map(|i| i + 1).unwrap_or(0);
+
+    if start >= end {
+        None
+    } else {
+        let result = cleaned[start..end].join("\n");
+        if result.trim().is_empty() { None } else { Some(result) }
+    }
 }

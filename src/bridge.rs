@@ -13,21 +13,17 @@ pub enum BridgeEvent {
     ShellOutput(String),
 }
 
-/// Wait this long after transitioning to Idle before emitting Response.
-const IDLE_SETTLE_MS: u64 = 500;
-
-/// After emitting a response, don't emit another for this long.
-/// Prevents duplicates during streaming where response grows frame by frame.
-const RESPONSE_COOLDOWN_MS: u64 = 3000;
+/// Spinner symbols that should never appear in responses
+const SPINNER_CHARS: &[char] = &['✶', '✸', '✹', '✺', '✷', '✵', '✳', '✢', '·', '✻', '✽'];
 
 /// Tracks screen state and emits events on meaningful transitions.
-/// Transport-agnostic — knows nothing about Telegram, WebSocket, etc.
+/// No timers, no settle delays. Pure state machine.
 pub struct Bridge {
     pub last_state: ClaudeState,
     pub last_process: DetectedProcess,
     pub last_sent_response: String,
-    idle_since: Option<std::time::Instant>,
-    last_response_at: Option<std::time::Instant>,
+    /// Whether we've been through Thinking since the last Response emit
+    saw_thinking: bool,
 }
 
 impl Bridge {
@@ -36,49 +32,34 @@ impl Bridge {
             last_state: ClaudeState::Unknown,
             last_process: DetectedProcess::Unknown,
             last_sent_response: String::new(),
-            idle_since: None,
-            last_response_at: None,
+            saw_thinking: false,
         }
     }
 
-    /// Process a screen update and return events for transports to handle.
     pub fn on_screen_update(&mut self, screen: &ClaudeScreen) -> Vec<BridgeEvent> {
         let mut events = Vec::new();
 
-        // Thinking
+        // Track thinking
         if screen.state == ClaudeState::Thinking {
+            self.saw_thinking = true;
             events.push(BridgeEvent::Thinking);
         }
 
-        // Idle settle + response
-        // Only emit after transitioning to Idle AND response is stable.
-        // Cooldown prevents re-emitting during streaming.
-        if screen.state == ClaudeState::Idle {
-            let in_cooldown = self.last_response_at
-                .map_or(false, |t| t.elapsed().as_millis() < RESPONSE_COOLDOWN_MS as u128);
-
-            if self.last_state != ClaudeState::Idle && !in_cooldown {
-                // Just transitioned to Idle — start settle timer
-                self.idle_since = Some(std::time::Instant::now());
-            }
-
-            if let Some(since) = self.idle_since {
-                if since.elapsed().as_millis() >= IDLE_SETTLE_MS as u128 {
-                    if let Some(ref response) = screen.response {
-                        if *response != self.last_sent_response && !response.is_empty() {
-                            events.push(BridgeEvent::Response(response.clone()));
-                            self.last_sent_response = response.clone();
-                            self.last_response_at = Some(std::time::Instant::now());
-                        }
-                    }
-                    self.idle_since = None;
+        // Response: emit on Thinking → Idle transition with valid content
+        if screen.state == ClaudeState::Idle && self.saw_thinking {
+            if let Some(ref response) = screen.response {
+                if !response.is_empty()
+                    && *response != self.last_sent_response
+                    && !looks_like_spinner(response)
+                {
+                    events.push(BridgeEvent::Response(response.clone()));
+                    self.last_sent_response = response.clone();
+                    self.saw_thinking = false;
                 }
             }
-        } else {
-            self.idle_since = None;
         }
 
-        // Shell mode output
+        // Shell mode output — no thinking gate needed
         if screen.process == DetectedProcess::Shell && screen.state == ClaudeState::Unknown {
             if let Some(ref response) = screen.response {
                 if *response != self.last_sent_response && !response.is_empty() {
@@ -101,7 +82,6 @@ impl Bridge {
         events
     }
 
-    /// Extract only the new part of shell output.
     fn diff_shell_output(&self, response: &str) -> String {
         if self.last_sent_response.is_empty() {
             return response.to_string();
@@ -118,4 +98,18 @@ impl Bridge {
             response.to_string()
         }
     }
+}
+
+/// Quick check if text looks like spinner content rather than a real response.
+fn looks_like_spinner(text: &str) -> bool {
+    let trimmed = text.trim();
+    // Single line starting with a spinner char
+    if trimmed.lines().count() <= 2 {
+        if let Some(first_char) = trimmed.chars().next() {
+            if SPINNER_CHARS.contains(&first_char) {
+                return true;
+            }
+        }
+    }
+    false
 }

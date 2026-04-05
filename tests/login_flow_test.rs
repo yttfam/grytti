@@ -1,7 +1,3 @@
-// Login flow state machine tests.
-// We can't import login.rs directly because it depends on api::SessionState.
-// Instead, test the bridge + claude state transitions that drive login.
-
 #[path = "../src/claude.rs"]
 mod claude;
 #[path = "../src/bridge.rs"]
@@ -25,21 +21,18 @@ fn bridge_emits_thinking() {
         state: ClaudeState::Thinking,
         process: DetectedProcess::ClaudeCode,
         response: None,
-        spinner_text: None,
-        tool_block: None,
-        login_url: None,
-        awaiting_code: false,
-        login_success: false,
+        spinner_text: None, tool_block: None, login_url: None,
+        awaiting_code: false, login_success: false,
     };
     let events = br.on_screen_update(&screen);
     assert!(events.iter().any(|e| matches!(e, BridgeEvent::Thinking)));
 }
 
 #[test]
-fn bridge_emits_response_after_settle() {
+fn bridge_emits_response_on_thinking_to_idle() {
     let mut br = Bridge::new();
 
-    // First: thinking
+    // Thinking
     let thinking = claude::ClaudeScreen {
         state: ClaudeState::Thinking,
         process: DetectedProcess::ClaudeCode,
@@ -49,7 +42,7 @@ fn bridge_emits_response_after_settle() {
     };
     br.on_screen_update(&thinking);
 
-    // Then: idle with response — settle timer starts
+    // Idle with response — should emit immediately (no timer)
     let idle = claude::ClaudeScreen {
         state: ClaudeState::Idle,
         process: DetectedProcess::ClaudeCode,
@@ -58,16 +51,23 @@ fn bridge_emits_response_after_settle() {
         awaiting_code: false, login_success: false,
     };
     let events = br.on_screen_update(&idle);
-    // No response yet — settle timer just started
-    assert!(!events.iter().any(|e| matches!(e, BridgeEvent::Response(_))));
-
-    // Wait for settle, then call again with same Idle state
-    std::thread::sleep(std::time::Duration::from_millis(600));
-    // idle_since is set, last_state is now Idle, but idle_since hasn't been cleared
-    // Need to re-enter the settle check — call with Idle again
-    let events = br.on_screen_update(&idle);
-    // Now response should be emitted
     assert!(events.iter().any(|e| matches!(e, BridgeEvent::Response(t) if t == "Hello!")));
+}
+
+#[test]
+fn bridge_no_response_without_thinking() {
+    let mut br = Bridge::new();
+
+    // Idle with response but no Thinking first — should NOT emit
+    let idle = claude::ClaudeScreen {
+        state: ClaudeState::Idle,
+        process: DetectedProcess::ClaudeCode,
+        response: Some("surprise!".to_string()),
+        spinner_text: None, tool_block: None, login_url: None,
+        awaiting_code: false, login_success: false,
+    };
+    let events = br.on_screen_update(&idle);
+    assert!(!events.iter().any(|e| matches!(e, BridgeEvent::Response(_))));
 }
 
 #[test]
@@ -83,7 +83,7 @@ fn bridge_emits_process_change() {
     let events = br.on_screen_update(&screen);
     assert!(events.iter().any(|e| matches!(e, BridgeEvent::ProcessChanged(DetectedProcess::Shell))));
 
-    // Same process again — no duplicate event
+    // Same process again — no duplicate
     let events = br.on_screen_update(&screen);
     assert!(!events.iter().any(|e| matches!(e, BridgeEvent::ProcessChanged(_))));
 }
@@ -92,13 +92,12 @@ fn bridge_emits_process_change() {
 fn bridge_no_duplicate_response() {
     let mut br = Bridge::new();
 
-    // Thinking → Idle with response
-    let thinking = claude::ClaudeScreen {
+    // Thinking → Idle → Response
+    br.on_screen_update(&claude::ClaudeScreen {
         state: ClaudeState::Thinking, process: DetectedProcess::ClaudeCode,
         response: None, spinner_text: None, tool_block: None,
         login_url: None, awaiting_code: false, login_success: false,
-    };
-    br.on_screen_update(&thinking);
+    });
 
     let idle = claude::ClaudeScreen {
         state: ClaudeState::Idle, process: DetectedProcess::ClaudeCode,
@@ -106,19 +105,32 @@ fn bridge_no_duplicate_response() {
         spinner_text: None, tool_block: None, login_url: None,
         awaiting_code: false, login_success: false,
     };
-
-    // First Idle call — starts settle timer
-    let events = br.on_screen_update(&idle);
-    assert!(!events.iter().any(|e| matches!(e, BridgeEvent::Response(_))));
-
-    // Wait for settle
-    std::thread::sleep(std::time::Duration::from_millis(600));
-
-    // Second Idle call — timer elapsed, response emitted
     let events = br.on_screen_update(&idle);
     assert!(events.iter().any(|e| matches!(e, BridgeEvent::Response(_))));
 
-    // Third Idle call — no duplicate
+    // Same idle again — no duplicate (saw_thinking was reset)
     let events = br.on_screen_update(&idle);
     assert!(!events.iter().any(|e| matches!(e, BridgeEvent::Response(_))));
+}
+
+#[test]
+fn bridge_rejects_spinner_response() {
+    let mut br = Bridge::new();
+
+    br.on_screen_update(&claude::ClaudeScreen {
+        state: ClaudeState::Thinking, process: DetectedProcess::ClaudeCode,
+        response: None, spinner_text: None, tool_block: None,
+        login_url: None, awaiting_code: false, login_success: false,
+    });
+
+    // Idle but response looks like spinner
+    let idle = claude::ClaudeScreen {
+        state: ClaudeState::Idle, process: DetectedProcess::ClaudeCode,
+        response: Some("· Incubating…".to_string()),
+        spinner_text: None, tool_block: None, login_url: None,
+        awaiting_code: false, login_success: false,
+    };
+    let events = br.on_screen_update(&idle);
+    assert!(!events.iter().any(|e| matches!(e, BridgeEvent::Response(_))),
+        "spinner text should not be emitted as Response");
 }
