@@ -33,8 +33,8 @@ pub struct SessionState {
     pub login_flow: Mutex<crate::login::LoginFlow>,
     /// VTE parser + grid for this session (used by main loop)
     pub runtime: Mutex<SessionRuntime>,
-    /// Telegram bot instance — None for headless (agent) sessions
-    pub tg_bot: Option<teloxide::Bot>,
+    /// Telegram bot instance — None for headless (agent) sessions. Can be hot-swapped.
+    pub tg_bot: Mutex<Option<teloxide::Bot>>,
 }
 
 pub struct SessionRuntime {
@@ -113,8 +113,7 @@ fn default_debounce() -> u64 {
 struct SessionUpdate {
     session_id: Option<String>,
     debounce_ms: Option<u64>,
-    #[allow(dead_code)]
-    bot_token: Option<String>, // TODO: runtime bot token change
+    bot_token: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -183,7 +182,7 @@ async fn create_session(
             last_update: tokio::time::Instant::now(),
             last_published: String::new(),
         }),
-        tg_bot,
+        tg_bot: tokio::sync::Mutex::new(tg_bot),
     });
 
     // Spawn TG bot only if valid token provided
@@ -269,6 +268,28 @@ async fn put_session(
         ms.debounce_ms = d;
     }
     drop(ms);
+
+    // Hot-add or replace Telegram bot
+    if let Some(token) = update.bot_token.as_deref().filter(|t| !t.is_empty()) {
+        let new_bot = teloxide::Bot::new(token);
+        *ss.tg_bot.lock().await = Some(new_bot);
+
+        // Spawn the TG dispatcher
+        let tg_token = token.to_string();
+        let bot_state_tg = ss.bot_state.clone();
+        let ss_tg = ss.clone();
+        let mqtt_client_tg = state.mqtt_client.clone();
+        tokio::spawn(async move {
+            if let Err(e) = crate::telegram::run_bot(&tg_token, bot_state_tg, ss_tg, mqtt_client_tg).await {
+                tracing::error!("telegram bot error: {}", e);
+            }
+        });
+
+        // Store token for persistence
+        state.bot_tokens.lock().await.insert(session_id.clone(), token.to_string());
+        tracing::info!(session = %session_id, "telegram bot attached via API");
+    }
+
     persist_sessions(&state).await;
     Ok(Json(OkResponse { ok: true }))
 }

@@ -29,7 +29,7 @@ async fn chat_index(State(state): State<Arc<GlobalState>>) -> Html<String> {
     );
     for (key, ss) in sessions.iter() {
         let ms = ss.mutable.lock().await;
-        let mode = if ss.tg_bot.is_some() { "telegram" } else { "headless" };
+        let mode = if ss.tg_bot.lock().await.is_some() { "telegram" } else { "headless" };
         html.push_str(&format!(
             "<li><a href='/chat/{}' style='color:#7dd3fc'>{}</a> \
              <span style='color:#8b949e'>({})</span></li>",

@@ -182,14 +182,17 @@ async fn main() -> Result<()> {
                             tracing::debug!(session = %key, state = ?screen.state, "claude state");
 
                             // TG updates only if bot is configured
-                            if let Some(ref tg_bot) = ss.tg_bot {
-                                let mut lf = ss.login_flow.lock().await;
-                                let consumed = lf.on_screen_update(tg_bot, ss, &screen).await;
-                                drop(lf);
+                            {
+                                let tg_guard = ss.tg_bot.lock().await;
+                                if let Some(ref tg_bot) = *tg_guard {
+                                    let mut lf = ss.login_flow.lock().await;
+                                    let consumed = lf.on_screen_update(tg_bot, ss, &screen).await;
+                                    drop(lf);
 
-                                if !consumed {
-                                    let mut state = ss.bot_state.lock().await;
-                                    telegram::on_screen_update(tg_bot, &mut state, &screen).await;
+                                    if !consumed {
+                                        let mut state = ss.bot_state.lock().await;
+                                        telegram::on_screen_update(tg_bot, &mut state, &screen).await;
+                                    }
                                 }
                             }
 
@@ -201,11 +204,14 @@ async fn main() -> Result<()> {
                             if snapshot != rt.last_published && !snapshot.is_empty() {
                                 rt.last_published = snapshot;
                             }
-                            if let Some(ref tg_bot) = ss.tg_bot {
-                                let state = ss.bot_state.lock().await;
-                                if state.last_state == claude::ClaudeState::Thinking {
-                                    if let Some(chat_id) = state.chat_id {
-                                        let _ = tg_bot.send_chat_action(chat_id, teloxide::types::ChatAction::Typing).await;
+                            {
+                                let tg_guard = ss.tg_bot.lock().await;
+                                if let Some(ref tg_bot) = *tg_guard {
+                                    let state = ss.bot_state.lock().await;
+                                    if state.last_state == claude::ClaudeState::Thinking {
+                                        if let Some(chat_id) = state.chat_id {
+                                            let _ = tg_bot.send_chat_action(chat_id, teloxide::types::ChatAction::Typing).await;
+                                        }
                                     }
                                 }
                             }
@@ -254,7 +260,7 @@ fn create_session_state(
             last_update: Instant::now(),
             last_published: String::new(),
         }),
-        tg_bot,
+        tg_bot: Mutex::new(tg_bot),
     });
 
     // Spawn TG bot only if we have a token
