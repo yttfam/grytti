@@ -45,14 +45,32 @@ impl Bridge {
             events.push(BridgeEvent::Thinking);
         }
 
-        // Response: emit on Thinking → Idle transition with valid content
+        // Response: emit on Thinking → Idle transition with valid content.
+        // If the response contains the previous one (multi-tool-call turn),
+        // only send the new part.
         if screen.state == ClaudeState::Idle && self.saw_thinking {
             if let Some(ref response) = screen.response {
                 if !response.is_empty()
                     && *response != self.last_sent_response
                     && !looks_like_spinner(response)
                 {
-                    events.push(BridgeEvent::Response(response.clone()));
+                    let to_send = if !self.last_sent_response.is_empty()
+                        && response.starts_with(&self.last_sent_response)
+                    {
+                        // Response grew — send only the new part
+                        let new_part = response[self.last_sent_response.len()..].trim();
+                        if new_part.is_empty() || looks_like_spinner(new_part) {
+                            None
+                        } else {
+                            Some(new_part.to_string())
+                        }
+                    } else {
+                        Some(response.clone())
+                    };
+
+                    if let Some(text) = to_send {
+                        events.push(BridgeEvent::Response(text));
+                    }
                     self.last_sent_response = response.clone();
                     self.saw_thinking = false;
                 }

@@ -494,7 +494,7 @@ fn is_separator_line(line: &str) -> bool {
     inner.starts_with(' ') && inner.ends_with(' ') && inner.trim().len() <= 20
 }
 
-/// Final cleanup: remove any line that contains spinner words or is junk from partial redraws.
+/// Final cleanup: remove junk from partial redraws, spinner text, garbled separators.
 fn clean_response(lines: Vec<String>) -> Option<String> {
     let cleaned: Vec<String> = lines.into_iter()
         .filter(|line| {
@@ -506,6 +506,22 @@ fn clean_response(lines: Vec<String>) -> Option<String> {
             // Remove lines that are just a spinner char
             if t.chars().count() <= 2 && t.chars().next().map_or(false, |c| SPINNER_CHARS.contains(&c)) {
                 return false;
+            }
+            // Remove garbled separator lines — words mixed with ─ from partial redraws
+            // Normal text doesn't contain ─. If a line has >3 dash chars mixed with text,
+            // it's a corrupted separator.
+            let dash_count = t.chars().filter(|&c| c == '─').count();
+            let char_count = t.chars().count();
+            if char_count > 10 && dash_count > 3 && t.contains('─') {
+                // Allow lines that are just tool output (e.g. heredoc ──EOF──)
+                // but reject lines where dashes replace spaces between words
+                let has_word_dash_word = t.contains("─") && {
+                    let parts: Vec<&str> = t.split('─').filter(|p| !p.is_empty()).collect();
+                    parts.len() > 2 && parts.iter().any(|p| p.chars().any(|c| c.is_alphabetic()))
+                };
+                if has_word_dash_word {
+                    return false;
+                }
             }
             true
         })
